@@ -178,6 +178,15 @@ struct css_style_rec_tag {
     lString8 background_image;
     css_background_repeat_value_t background_repeat;
     css_length_t background_position[2]; ///< horizontal, vertical
+    // If true, the corresponding background_position[] component is a CSS3
+    // edge-offset length (eg. the "10px" in "background-position: right 10px")
+    // that could not be reduced to a plain percentage at parse time, and must
+    // be measured as an inset from the right/bottom edge of the positioning
+    // area instead of as an absolute offset from the left/top edge. A
+    // percentage offset (eg. "right 20%") is always reduced to an equivalent
+    // plain percentage at parse time (100% - 20% == 80%), so never sets this.
+    bool background_position_x_from_end;
+    bool background_position_y_from_end;
     css_length_t background_size[2];//first width and second height
     css_border_collapse_value_t border_collapse;
     css_length_t border_spacing[2];//first horizontal and the second vertical spacing
@@ -243,6 +252,8 @@ struct css_style_rec_tag {
     , border_style_right(css_border_none)
     , border_style_left(css_border_none)
     , background_repeat(css_background_repeat)
+    , background_position_x_from_end(false)
+    , background_position_y_from_end(false)
     , border_collapse(css_border_c_inherit)
     , orphans(css_orphans_widows_inherit)
     , widows(css_orphans_widows_inherit)

@@ -490,43 +490,120 @@ should be dropped and the property should fall back to its initial value
   </div>
 </div>
 
-<h3>9. Unsupported 4-value edge-offset form (rejected)</h3>
+<h3>9. Three- and four-value edge-offset form</h3>
 <p class="intro">
 CSS also defines a 3-/4-value "edge-offset" form of <code>&lt;bg-position&gt;</code>
 (eg. <code>right 10px bottom 20px</code>), which lets a length/percentage be
-measured in from the <code>right</code>/<code>bottom</code> edge instead of
-the near edge. crengine's parser doesn't implement this form. Rather than
-silently reading only the first two tokens and producing an incorrect
-position, it detects the extra token(s) and rejects the whole declaration,
-falling back to the initial value (<code>0% 0%</code>, top left) &#8212;
-same as section 8.
+measured as an inset from the <code>right</code>/<code>bottom</code> edge
+instead of always from the near (<code>left</code>/<code>top</code>) edge.
+This is now supported. A percentage offset is always reducible to a plain
+percentage (<code>right 20%</code> == <code>calc(100% - 20%)</code> ==
+<code>80%</code>); a length offset (<code>px</code>, <code>em</code>, etc.)
+can't be reduced that way, so it's resolved at render time as
+<code>(container size &#8722; image size) &#8722; offset</code>.
 </p>
 <div class="grid">
   <div class="case">
     <div class="label"><code>background-position: right 10px bottom 20px;</code></div>
-    <div class="note">unsupported 4-value form &#8212; expected: falls back
-      to top left (<em>not</em> "10px from top, ignoring 'bottom 20px'")</div>
+    <div class="note">4-value form &#8212; expected: 10px in from the right
+      edge, 20px up from the bottom edge</div>
     <div class="box" style="background-position: right 10px bottom 20px;"></div>
   </div>
   <div class="case">
-    <div class="label"><code>background-position: left 10px top 20px;</code></div>
-    <div class="note">unsupported 4-value form &#8212; expected: falls back
-      to top left</div>
-    <div class="box" style="background-position: left 10px top 20px;"></div>
+    <div class="label"><code>background-position: bottom 20px right 10px;</code></div>
+    <div class="note">4-value form, edge+offset pairs reordered &#8212;
+      expected: identical to the previous case &#8212; pair order doesn't
+      matter</div>
+    <div class="box" style="background-position: bottom 20px right 10px;"></div>
+  </div>
+  <div class="case">
+    <div class="label"><code>background-position: right 20% bottom 10%;</code></div>
+    <div class="note">4-value form with percentage offsets, which reduce
+      directly to a plain percentage &#8212; expected: identical to
+      <code>background-position: 80% 90%;</code></div>
+    <div class="box" style="background-position: right 20% bottom 10%;"></div>
   </div>
   <div class="case">
     <div class="label"><code>background-position: right 10px top;</code></div>
-    <div class="note">unsupported 3-value form (one side has an offset, the
-      other is a bare keyword) &#8212; expected: falls back to top left
-      (<em>not</em> "right edge, top edge", ignoring the trailing
-      <code>top</code>)</div>
+    <div class="note">3-value form: only the horizontal component has an
+      offset attached, the vertical component (<code>top</code>) has an
+      implied zero offset &#8212; expected: 10px in from the right edge, at
+      the top edge (contrast with the quirky 2-value <code>right 10px</code>
+      in section 6, which instead means "right edge, 10px from the top")</div>
     <div class="box" style="background-position: right 10px top;"></div>
   </div>
   <div class="case">
     <div class="label"><code>background-position: top right 10px;</code></div>
-    <div class="note">unsupported 3-value form, other order &#8212;
-      expected: falls back to top left</div>
+    <div class="note">same 3-value form, reordered &#8212; expected:
+      identical to the previous case</div>
     <div class="box" style="background-position: top right 10px;"></div>
+  </div>
+  <div class="case">
+    <div class="label"><code>background-position: left 10px bottom;</code></div>
+    <div class="note">an offset attached to <code>left</code>/<code>top</code>
+      is just a plain offset from that edge, same as the existing 2-value
+      form &#8212; expected: identical to <code>background-position: 10px bottom;</code>
+      (section 6)</div>
+    <div class="box" style="background-position: left 10px bottom;"></div>
+  </div>
+  <div class="case">
+    <div class="label"><code>background-position: center right 10px;</code></div>
+    <div class="note"><code>center</code> is flexible and takes whichever
+      axis the other part doesn't use &#8212; expected: vertically centered,
+      10px in from the right edge</div>
+    <div class="box" style="background-position: center right 10px;"></div>
+  </div>
+  <div class="case">
+    <div class="label"><code>background-position: bottom 10px center;</code></div>
+    <div class="note"><code>center</code> in the other slot &#8212;
+      expected: horizontally centered, 10px up from the bottom edge</div>
+    <div class="box" style="background-position: bottom 10px center;"></div>
+  </div>
+  <div class="case">
+    <div class="label"><code>background-position: right -10px bottom -10px;</code></div>
+    <div class="note">negative edge-offsets are valid, and push the position
+      outside the box on that edge &#8212; expected: the marker is clipped at
+      the right and bottom edges (compare with the negative-length cases in
+      section 3)</div>
+    <div class="box" style="background-position: right -10px bottom -10px;"></div>
+  </div>
+</div>
+
+<h3>10. Still-invalid edge-offset combinations (rejected)</h3>
+<p class="intro">
+Not every combination of keywords and offsets is valid under the extended
+grammar &#8212; these should still fall back to the initial value
+(<code>0% 0%</code>, top left), same as section 8, rather than being
+misinterpreted.
+</p>
+<div class="grid">
+  <div class="case">
+    <div class="label"><code>background-position: right 10px left;</code></div>
+    <div class="note">invalid: both components are forced horizontal
+      (<code>right</code>/<code>left</code>), leaving the vertical component
+      unfilled &#8212; expected: falls back to top left</div>
+    <div class="box" style="background-position: right 10px left;"></div>
+  </div>
+  <div class="case">
+    <div class="label"><code>background-position: top 10px bottom 20px;</code></div>
+    <div class="note">invalid: both components are forced vertical &#8212;
+      expected: falls back to top left</div>
+    <div class="box" style="background-position: top 10px bottom 20px;"></div>
+  </div>
+  <div class="case">
+    <div class="label"><code>background-position: center 10px bottom;</code></div>
+    <div class="note">invalid: <code>center</code> can't take an attached
+      offset (only <code>left</code>/<code>right</code>/<code>top</code>/
+      <code>bottom</code> can) &#8212; expected: falls back to top left</div>
+    <div class="box" style="background-position: center 10px bottom;"></div>
+  </div>
+  <div class="case">
+    <div class="label"><code>background-position: right 10px bottom 20px 30px;</code></div>
+    <div class="note">invalid: a 5th token can't be part of any valid
+      <code>background-position</code> &#8212; expected: falls back to top
+      left (<em>not</em> "10px from the right, 20px from the bottom,
+      ignoring the trailing 30px")</div>
+    <div class="box" style="background-position: right 10px bottom 20px 30px;"></div>
   </div>
 </div>
 </section>

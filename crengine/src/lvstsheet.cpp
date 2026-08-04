@@ -3332,18 +3332,54 @@ static css_length_t bg_position_component_value( int kw, const css_length_t & nu
 static inline bool bg_pos_is_h_keyword( int kw ) { return kw==bg_pos_left || kw==bg_pos_right || kw==bg_pos_center; }
 static inline bool bg_pos_is_v_keyword( int kw ) { return kw==bg_pos_top  || kw==bg_pos_bottom || kw==bg_pos_center; }
 
-// Parses a full <bg-position> value (1 or 2 components, keywords and/or
-// <percentage>/<length>) from *decl into pos[0] (horizontal) and pos[1]
-// (vertical). Returns false, without touching decl or pos, if the value
-// at *decl isn't a valid 1- or 2-value <bg-position>.
-// Note: this does not implement the CSS3 4-value edge-offset syntax
-// (eg. "right 10px bottom 20px"), which is rare in ebook stylesheets.
-static bool parse_bg_position_value( const char * & decl, css_length_t pos[2] ) {
+// Resolves one "part" of the 3-/4-value edge-offset form -- a keyword
+// (left/right/top/bottom/center) with an optional attached offset -- to its
+// final css_length_t, and whether it must be measured from the far edge
+// (right/bottom) at render time rather than as an absolute offset from the
+// near (left/top) edge. "has_offset" false means an implied zero offset
+// (eg. the "top" in "right 10px top" means "top 0").
+static css_length_t bg_position_edge_component_value( int kw, bool has_offset, const css_length_t & offset, bool & from_end ) {
+    from_end = false;
+    if ( kw == bg_pos_center )
+        return css_length_t(css_val_percent, 50 << 8);
+    bool is_far_edge = (kw == bg_pos_right || kw == bg_pos_bottom);
+    if ( !has_offset )
+        return css_length_t(css_val_percent, is_far_edge ? (100 << 8) : 0);
+    if ( !is_far_edge )
+        // "left <offset>"/"top <offset>" is just a plain offset from the
+        // near edge -- no different from the existing bare length/percentage
+        // in the 1-/2-value form.
+        return offset;
+    if ( offset.type == css_val_percent )
+        // "right 20%" == calc(100% - 20%) == 80%: fully reducible to a plain
+        // percentage, so no need for the from-end machinery below.
+        return css_length_t(css_val_percent, (100 << 8) - offset.value);
+    // "right 10px" == calc(100% - 10px): can't be reduced to a single plain
+    // css_length_t (it's a percentage minus an absolute length), so store the
+    // raw offset and flag it: DrawBackgroundImage() will compute
+    // (positioning-area size - image size) - offset at render time.
+    from_end = true;
+    return offset;
+}
+
+// Parses a full <bg-position> value: the 1- and 2-value forms (keywords
+// and/or <percentage>/<length>), as well as the CSS3 3- and 4-value
+// "edge-offset" form (eg. "right 10px", "right 10px bottom 20px"), which
+// lets a <percentage>/<length> be measured as an inset from the right/
+// bottom edge instead of always from the left/top edge. On success, sets
+// pos[0]/pos[1] (horizontal/vertical) and from_end[0]/[1] (whether that
+// axis's value is such a from-far-edge offset - see
+// bg_position_edge_component_value() above). Returns false, without
+// touching decl/pos/from_end, if the value at *decl isn't a valid
+// <bg-position>.
+static bool parse_bg_position_value( const char * & decl, css_length_t pos[2], bool from_end[2] ) {
     const char * decl_save = decl;
-    css_length_t val[2];
-    int kw[2] = { bg_pos_none, bg_pos_none };
+    from_end[0] = false;
+    from_end[1] = false;
+    css_length_t val[4];
+    int kw[4] = { bg_pos_none, bg_pos_none, bg_pos_none, bg_pos_none };
     int count = 0;
-    for ( ; count < 2; count++ ) {
+    for ( ; count < 4; count++ ) {
         int k = parse_bg_position_token(decl, val[count]);
         if ( k == bg_pos_none )
             break;
@@ -3367,48 +3403,119 @@ static bool parse_bg_position_value( const char * & decl, css_length_t pos[2] ) 
         }
         return true;
     }
-    // Two components: per the <bg-position> grammar (ignoring the 4-value
-    // edge-offset form, out of scope here), a pair is valid in one of two
-    // ways:
-    //  - strict (horizontal, vertical) order: the 1st component is
-    //    left/center/right/<percentage-or-length>, and the 2nd is
-    //    top/center/bottom/<percentage-or-length> (this is what accepts a
-    //    bare number, eg. "left 25%", "75% top", "right 10px");
-    //  - a reordered keyword-only pair (no bare numbers): one of
-    //    {left,center,right} and one of {top,center,bottom}, in either
-    //    order (eg. "top right" meaning the same as "right top").
-    // Anything else -- an axis clash like "top bottom"/"left right", or a
-    // bare number paired with a mismatched keyword like "top 10px"/
-    // "10px left" -- is invalid.
-    bool valid;
-    if ( kw[0] != bg_pos_top && kw[0] != bg_pos_bottom && kw[1] != bg_pos_left && kw[1] != bg_pos_right ) {
-        pos[0] = bg_position_component_value(kw[0], val[0]);
-        pos[1] = bg_position_component_value(kw[1], val[1]);
-        valid = true;
+    if ( count == 2 ) {
+        // Per the <bg-position> grammar (ignoring the 3-/4-value edge-offset
+        // form, handled below), a pair is valid in one of two ways:
+        //  - strict (horizontal, vertical) order: the 1st component is
+        //    left/center/right/<percentage-or-length>, and the 2nd is
+        //    top/center/bottom/<percentage-or-length> (this is what accepts a
+        //    bare number, eg. "left 25%", "75% top", "right 10px");
+        //  - a reordered keyword-only pair (no bare numbers): one of
+        //    {left,center,right} and one of {top,center,bottom}, in either
+        //    order (eg. "top right" meaning the same as "right top").
+        // Anything else -- an axis clash like "top bottom"/"left right", or a
+        // bare number paired with a mismatched keyword like "top 10px"/
+        // "10px left" -- is invalid.
+        bool valid;
+        if ( kw[0] != bg_pos_top && kw[0] != bg_pos_bottom && kw[1] != bg_pos_left && kw[1] != bg_pos_right ) {
+            pos[0] = bg_position_component_value(kw[0], val[0]);
+            pos[1] = bg_position_component_value(kw[1], val[1]);
+            valid = true;
+        }
+        else if ( kw[0] != bg_pos_numeric && kw[1] != bg_pos_numeric &&
+                  bg_pos_is_h_keyword(kw[1]) && bg_pos_is_v_keyword(kw[0]) ) {
+            pos[0] = bg_position_component_value(kw[1], val[1]);
+            pos[1] = bg_position_component_value(kw[0], val[0]);
+            valid = true;
+        }
+        else {
+            valid = false;
+        }
+        if ( valid )
+            return true;
+        decl = decl_save;
+        return false;
     }
-    else if ( kw[0] != bg_pos_numeric && kw[1] != bg_pos_numeric &&
-              bg_pos_is_h_keyword(kw[1]) && bg_pos_is_v_keyword(kw[0]) ) {
-        pos[0] = bg_position_component_value(kw[1], val[1]);
-        pos[1] = bg_position_component_value(kw[0], val[0]);
-        valid = true;
+    // 3 or 4 components: the CSS3 edge-offset form. Group the raw tokens
+    // into (at most) 2 "parts", each a keyword optionally followed by its
+    // own attached offset (eg. "right 10px" is ONE part; a keyword with
+    // nothing attached, like the "top" in "right 10px top", is a part with
+    // an implied zero offset). A bare numeric with no preceding keyword is
+    // invalid here (bare numbers are only valid in the 1-/2-value forms
+    // above, already handled).
+    struct { int kw; bool has_offset; css_length_t offset; } parts[2];
+    int nparts = 0;
+    int i = 0;
+    bool ok = true;
+    while ( ok && i < count ) {
+        if ( kw[i] == bg_pos_numeric || nparts >= 2 ) {
+            ok = false;
+            break;
+        }
+        parts[nparts].kw = kw[i];
+        if ( i + 1 < count && kw[i+1] == bg_pos_numeric ) {
+            parts[nparts].has_offset = true;
+            parts[nparts].offset = val[i+1];
+            i += 2;
+        }
+        else {
+            parts[nparts].has_offset = false;
+            i += 1;
+        }
+        nparts++;
     }
+    if ( !ok || i != count || nparts != 2 ) {
+        decl = decl_save;
+        return false;
+    }
+    // "center" can't take an offset (only left/right/top/bottom can).
+    if ( (parts[0].kw == bg_pos_center && parts[0].has_offset) ||
+         (parts[1].kw == bg_pos_center && parts[1].has_offset) ) {
+        decl = decl_save;
+        return false;
+    }
+    // Assign each part to its axis: left/right are always horizontal,
+    // top/bottom are always vertical, and center is flexible (takes
+    // whichever axis the other, non-center part doesn't). Exactly one part
+    // must end up on each axis; anything else (an axis clash, or -- can't
+    // actually happen here, since reaching this point required at least one
+    // real edge keyword to carry the extra offset(s) -- both being center)
+    // is invalid.
+    int axis[2]; // 0: horizontal-only, 1: vertical-only, -1: flexible (center)
+    for ( int p = 0; p < 2; p++ ) {
+        if ( parts[p].kw == bg_pos_left || parts[p].kw == bg_pos_right )
+            axis[p] = 0;
+        else if ( parts[p].kw == bg_pos_top || parts[p].kw == bg_pos_bottom )
+            axis[p] = 1;
+        else
+            axis[p] = -1;
+    }
+    int h_part, v_part;
+    if ( axis[0] == 0 && axis[1] != 0 ) { h_part = 0; v_part = 1; }
+    else if ( axis[1] == 0 && axis[0] != 0 ) { h_part = 1; v_part = 0; }
+    else if ( axis[0] == 1 && axis[1] != 1 ) { h_part = 1; v_part = 0; }
+    else if ( axis[1] == 1 && axis[0] != 1 ) { h_part = 0; v_part = 1; }
     else {
-        valid = false;
+        decl = decl_save;
+        return false;
     }
-    if ( valid ) {
-        // A 3rd bg-position-like token right after a valid pair means this
-        // is (or was meant to be) the CSS3 4-value edge-offset form (eg.
-        // "right 10px bottom 20px", or even just "right 10px top"), which
-        // isn't supported (see note above). Reject the whole value rather
-        // than silently keeping only its first two components, which would
-        // resolve to an incorrect position.
+    pos[0] = bg_position_edge_component_value( parts[h_part].kw, parts[h_part].has_offset, parts[h_part].offset, from_end[0] );
+    pos[1] = bg_position_edge_component_value( parts[v_part].kw, parts[v_part].has_offset, parts[v_part].offset, from_end[1] );
+    if ( count == 4 ) {
+        // Our tokenizer above stops at 4 tokens even if a further valid
+        // bg-position-like token would immediately follow, so that case
+        // isn't caught by the loop's own (real) stop condition above like it
+        // is for the other counts. Peek for one: a 5th such token can't be
+        // part of any valid <bg-position>, so reject the whole value rather
+        // than silently keeping only its first 4 components.
         const char * after = decl;
         css_length_t dummy;
-        if ( parse_bg_position_token(after, dummy) == bg_pos_none )
-            return true;
+        if ( parse_bg_position_token(after, dummy) != bg_pos_none ) {
+            decl = decl_save;
+            return false;
+        }
     }
-    decl = decl_save;
-    return false;
+    return true;
 }
 
 //border-collpase names
@@ -5003,14 +5110,29 @@ bool LVCssDeclaration::parse( const char * &decl, bool higher_importance, lxmlDo
                 break;
             case cssd_background_position:
                 {
-                    IF_g_PUSH_LENGTH_AND_break(2, false, css_val_percent, 0);
+                    if ( g >= 0 ) {
+                        // Same as IF_g_PUSH_LENGTH_AND_break(2, false, css_val_percent, 0),
+                        // plus the 2 extra from-end flags this property now also carries
+                        // (see parse_bg_position_value()).
+                        buf<<(lUInt32) (prop_code | importance | parse_important(decl));
+                        for (int i = 0; i < 2; i++) {
+                            buf<<(lUInt32) (g == css_g_inherit ? css_val_inherited : css_val_percent);
+                            buf<<(lUInt32) 0;
+                        }
+                        buf<<(lUInt32) 0; // background_position_x_from_end
+                        buf<<(lUInt32) 0; // background_position_y_from_end
+                        break;
+                    }
                     css_length_t pos[2];
-                    if ( parse_bg_position_value( decl, pos ) ) {
+                    bool from_end[2];
+                    if ( parse_bg_position_value( decl, pos, from_end ) ) {
                         buf<<(lUInt32) (prop_code | importance | parse_important(decl));
                         for (int i = 0; i < 2; i++) {
                             buf<<(lUInt32) pos[i].type;
                             buf<<(lUInt32) pos[i].value;
                         }
+                        buf<<(lUInt32) (from_end[0] ? 1 : 0);
+                        buf<<(lUInt32) (from_end[1] ? 1 : 0);
                     }
                 }
                 break;
@@ -5099,7 +5221,8 @@ bool LVCssDeclaration::parse( const char * &decl, bool higher_importance, lxmlDo
                             skip_spaces(decl);
                         }
                         css_length_t position[2];
-                        bool has_position = parse_bg_position_value( decl, position );
+                        bool position_from_end[2];
+                        bool has_position = parse_bg_position_value( decl, position, position_from_end );
                         if( repeat == -1 ) { // Try parsing repeat after position
                             skip_spaces(decl);
                             repeat = parse_name( decl, css_bg_repeat_names, -1 );
@@ -5119,6 +5242,8 @@ bool LVCssDeclaration::parse( const char * &decl, bool higher_importance, lxmlDo
                                 buf<<(lUInt32) position[i].type;
                                 buf<<(lUInt32) position[i].value;
                             }
+                            buf<<(lUInt32) (position_from_end[0] ? 1 : 0);
+                            buf<<(lUInt32) (position_from_end[1] ? 1 : 0);
                         }
                     }
                     else { // no url, only color
@@ -5941,6 +6066,8 @@ void LVCssDeclaration::apply( css_style_rec_t * style, const ldomNode * node ) c
         case cssd_background_position:
             style->Apply( read_length(p), &style->background_position[0], imp_bit_background_position_x, is_important );
             style->Apply( read_length(p), &style->background_position[1], imp_bit_background_position_y, is_important );
+            style->Apply( (bool)(*p++ != 0), &style->background_position_x_from_end, imp_bit_background_position_x, is_important );
+            style->Apply( (bool)(*p++ != 0), &style->background_position_y_from_end, imp_bit_background_position_y, is_important );
             break;
         case cssd_background_size:
             style->Apply( read_length(p), &style->background_size[0], imp_bit_background_size_h, is_important );

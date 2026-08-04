@@ -4854,6 +4854,8 @@ void copystyle( css_style_ref_t source, css_style_ref_t dest )
     dest->background_repeat=source->background_repeat;
     dest->background_position[0]=source->background_position[0];
     dest->background_position[1]=source->background_position[1];
+    dest->background_position_x_from_end=source->background_position_x_from_end;
+    dest->background_position_y_from_end=source->background_position_y_from_end;
     dest->background_size[0]=source->background_size[0];
     dest->background_size[1]=source->background_size[1];
     dest->border_collapse=source->border_collapse;
@@ -10037,13 +10039,22 @@ void DrawBackgroundImage(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int d
             int draw_x;
             if ( bg_pos_x.type == css_val_percent )
                 draw_x = (width - img_w) * bg_pos_x.value / (100 * 256);
-            else
+            else {
                 draw_x = lengthToPx(enode, bg_pos_x, width);
+                if ( style->background_position_x_from_end )
+                    // eg. "right 10px": a CSS3 edge-offset length, measured as
+                    // an inset from the right edge of the positioning area,
+                    // rather than as an absolute offset from the left edge.
+                    draw_x = (width - img_w) - draw_x;
+            }
             int draw_y;
             if ( bg_pos_y.type == css_val_percent )
                 draw_y = (height - img_h) * bg_pos_y.value / (100 * 256);
-            else
+            else {
                 draw_y = lengthToPx(enode, bg_pos_y, height);
+                if ( style->background_position_y_from_end )
+                    draw_y = (height - img_h) - draw_y;
+            }
             // If tiling, we need to adjust the transform x/y (the offset
             // in img, so, a value between 0 and img_w/h) to the point
             // inside image that should be at top left of target area
@@ -11705,8 +11716,10 @@ void setNodeStyle( ldomNode * enode, css_style_ref_t parent_style, LVFontRef par
     inheritLength( pstyle->background_size[0], parent_style->background_size[0], parent_font_size );
     inheritLength( pstyle->background_size[1], parent_style->background_size[1], parent_font_size );
     // background_position[2] [XY]: computed value: "as specified, but with relative lengths converted into absolute lengths"
-    inheritLength( pstyle->background_position[0], parent_style->background_position[0], parent_font_size );
-    inheritLength( pstyle->background_position[1], parent_style->background_position[1], parent_font_size );
+    if ( inheritLength( pstyle->background_position[0], parent_style->background_position[0], parent_font_size ) )
+        pstyle->background_position_x_from_end = parent_style->background_position_x_from_end;
+    if ( inheritLength( pstyle->background_position[1], parent_style->background_position[1], parent_font_size ) )
+        pstyle->background_position_y_from_end = parent_style->background_position_y_from_end;
 
     // border_width[4] [TRBL]: computed value: "the absolute length or 0 if border-style is none or hidden"
     if ( pstyle->border_width[0].type == css_val_inherited ) {

@@ -48,7 +48,7 @@ lUInt32 calcHash(font_ref_t & f)
 lUInt32 calcHash(css_style_rec_t & rec)
 {
     if ( !rec.hash )
-        rec.hash = (((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((
+        rec.hash = (((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((
          + (lUInt32)rec.important[0]) * 31
          + (lUInt32)rec.important[1]) * 31
          + (lUInt32)rec.important[2]) * 31
@@ -107,6 +107,8 @@ lUInt32 calcHash(css_style_rec_t & rec)
          + (lUInt32)rec.background_repeat)*31
          + (lUInt32)rec.background_position[0].pack())*31
          + (lUInt32)rec.background_position[1].pack())*31
+         + (lUInt32)rec.background_position_x_from_end)*31
+         + (lUInt32)rec.background_position_y_from_end)*31
          + (lUInt32)rec.background_size[0].pack())*31
          + (lUInt32)rec.background_size[1].pack())*31
          + (lUInt32)rec.font_family) * 31
@@ -197,6 +199,8 @@ bool operator == (const css_style_rec_t & r1, const css_style_rec_t & r2)
            r1.background_repeat==r2.background_repeat&&
            r1.background_position[0]==r2.background_position[0]&&
            r1.background_position[1]==r2.background_position[1]&&
+           r1.background_position_x_from_end==r2.background_position_x_from_end&&
+           r1.background_position_y_from_end==r2.background_position_y_from_end&&
            r1.background_size[0]==r2.background_size[0]&&
            r1.background_size[1]==r2.background_size[1]&&
            r1.border_collapse==r2.border_collapse&&
@@ -405,6 +409,8 @@ bool css_style_rec_t::serialize( SerialBuf & buf )
     ST_PUT_ENUM(background_repeat);
     ST_PUT_LEN(background_position[0]);
     ST_PUT_LEN(background_position[1]);
+    buf << background_position_x_from_end;
+    buf << background_position_y_from_end;
     ST_PUT_LEN(background_size[0]);
     ST_PUT_LEN(background_size[1]);
     ST_PUT_ENUM(border_collapse);
@@ -483,6 +489,8 @@ bool css_style_rec_t::deserialize( SerialBuf & buf )
     ST_GET_ENUM(css_background_repeat_value_t ,background_repeat);
     ST_GET_LEN(background_position[0]);
     ST_GET_LEN(background_position[1]);
+    buf >> background_position_x_from_end;
+    buf >> background_position_y_from_end;
     ST_GET_LEN(background_size[0]);
     ST_GET_LEN(background_size[1]);
     ST_GET_ENUM(css_border_collapse_value_t ,border_collapse);
