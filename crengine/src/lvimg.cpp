@@ -2101,8 +2101,9 @@ static bool lunasvgDrawImageHelper(lunasvg::external_context_t * xcontext, const
             if ( data.startsWith(lString32("data:image/svg+xml")) ) {
                 int pos = data.pos(U',');
                 if ( pos > 0 ) {
-                    // The attribute value has already been url-decoded at parsing time
-                    lString8 plaindata = UnicodeToUtf8(refName.substr(pos+1));
+                    // The payload may or may not be percent-encoded; see the
+                    // matching comment in ldomDocument::getObjectImageStream().
+                    lString8 plaindata = UnicodeToUtf8(DecodeHTMLUrlString(refName.substr(pos+1)));
                     ref = LVCreateStringStream(plaindata);
                 }
             }
