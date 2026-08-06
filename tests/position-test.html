@@ -43,8 +43,22 @@ code { background-color: #eee; }
     margin-bottom: 3px;
 }
 #background-position-test .box {
+    /* inline-block (not the default block) so the box's own pixel width is
+       always honored: under koreader's "Book" rendering profile, a plain
+       block element's CSS width is only kept if it's a relative unit
+       (%, em, ...) unless absolute units are separately allowed, but an
+       inline-block's width is always computed from its own style, same as
+       a float, regardless of those flags. */
+    display: inline-block;
     width: 200px;
-    height: 110px;
+    /* padding-top (not height) so the box gets a real rendered height even
+       under koreader's "Book" rendering profile, which doesn't force CSS
+       height onto plain empty blocks (only <hr>/images/floats always get
+       their style height honored there); padding is always added to a
+       block's height regardless of that flag, and backgrounds paint across
+       the padding box by default, so this renders identically to a 110px
+       height in both "Book" and "Web" modes. */
+    padding-top: 110px;
     border: 1px solid #333;
     background-color: #eef1f5;
     /* Target marker, reused by every test case; only background-position
@@ -102,6 +116,10 @@ code { background-color: #eee; }
     border: 1px solid #333;
 }
 #background-image-scaling-test .bgbox {
+    /* inline-block so this box's own pixel width/padding-driven height are
+       always honored under koreader's "Book" rendering profile (see the
+       comment on #background-position-test .box for why). */
+    display: inline-block;
     border: 1px solid #333;
     background-color: #f5f5f5;
     /* 6x4 grid of 10px checkerboard cells (60x40 native size), with a red
@@ -124,6 +142,10 @@ code { background-color: #eee; }
     max-width: 55em;
 }
 #background-repeat-test .repeat-box {
+    /* inline-block so this box's own pixel width/padding-driven height are
+       always honored under koreader's "Book" rendering profile (see the
+       comment on #background-position-test .box for why). */
+    display: inline-block;
     border: 1px solid #333;
     background-color: #f5f5f5;
     /* 20x20 tile split into two diagonal triangles with a border, so that
@@ -741,7 +763,7 @@ unintended stretch or squash shows up as non-square checkerboard cells.
       <div class="tile-label">&lt;img&gt;, no size set</div>
     </div>
     <div class="tile-wrap">
-      <div class="bgbox" style="width: 120px; height: 80px;"></div>
+      <div class="bgbox" style="width: 120px; padding-top: 80px;"></div>
       <div class="tile-label">background-image, no background-size,<br/>in a 120&#215;80px box</div>
     </div>
   </div>
@@ -756,7 +778,7 @@ unintended stretch or squash shows up as non-square checkerboard cells.
     size or <code>gRenderDPI</code> &#8212; width doubled, height
     unchanged, so the checkerboard cells become 20px wide &#215; 10px
     tall (visibly non-square)</div>
-  <div class="bgbox" style="width: 120px; height: 40px; background-size: 120px 40px;"></div>
+  <div class="bgbox" style="width: 120px; padding-top: 40px; background-size: 120px 40px;"></div>
 </div>
 
 <h3>3. background-size with one axis auto (aspect ratio preserved)</h3>
@@ -771,7 +793,7 @@ unintended stretch or squash shows up as non-square checkerboard cells.
     confirms the aspect-ratio math uses the DPI-scaled width and height
     consistently, so the ratio comes out right regardless of
     <code>gRenderDPI</code>.</div>
-  <div class="bgbox" style="width: 90px; height: 60px; background-size: 90px auto;"></div>
+  <div class="bgbox" style="width: 90px; padding-top: 60px; background-size: 90px auto;"></div>
 </div>
 
 <h3>4. background-size: cover</h3>
@@ -784,7 +806,7 @@ unintended stretch or squash shows up as non-square checkerboard cells.
     left, the crop comes off the right/bottom, so the red top-left marker
     should remain visible while the green bottom-right marker is cropped
     away</div>
-  <div class="bgbox" style="width: 150px; height: 40px; background-size: cover;"></div>
+  <div class="bgbox" style="width: 150px; padding-top: 40px; background-size: cover;"></div>
 </div>
 
 <h3>5. background-size: contain</h3>
@@ -797,7 +819,7 @@ unintended stretch or squash shows up as non-square checkerboard cells.
     remain visible; since <code>background-position</code> defaults to top
     left, the image sits flush in the top-left corner of the box, leaving
     bare background-color below and/or to the right</div>
-  <div class="bgbox" style="width: 150px; height: 100px; background-size: contain;"></div>
+  <div class="bgbox" style="width: 150px; padding-top: 100px; background-size: contain;"></div>
 </div>
 
 </section>
@@ -828,7 +850,7 @@ adjacent tiles indicates a tiling regression.
     of tiles are partially clipped by the box edges (10&#215;20px / 20&#215;3px
     /  10&#215;3px remainders) rather than leaving a gap or squeezing in an
     extra part-tile</div>
-  <div class="repeat-box" style="width: 205px; height: 103px; background-repeat: repeat;"></div>
+  <div class="repeat-box" style="width: 205px; padding-top: 103px; background-repeat: repeat;"></div>
 </div>
 
 <h3>2. Default (property not set)</h3>
@@ -837,7 +859,7 @@ adjacent tiles indicates a tiling regression.
     205&#215;103px box</div>
   <div class="note">expected: identical to case 1 &#8212; <code>repeat</code>
     is the initial value</div>
-  <div class="repeat-box" style="width: 205px; height: 103px;"></div>
+  <div class="repeat-box" style="width: 205px; padding-top: 103px;"></div>
 </div>
 
 <h3>3. background-repeat: repeat-x</h3>
@@ -848,7 +870,7 @@ adjacent tiles indicates a tiling regression.
     width along the top edge (default <code>background-position: 0% 0%</code>),
     clipped on the right; no tiling downward &#8212; the rest of the box
     below the row shows only the plain background-color</div>
-  <div class="repeat-box" style="width: 205px; height: 60px; background-repeat: repeat-x;"></div>
+  <div class="repeat-box" style="width: 205px; padding-top: 60px; background-repeat: repeat-x;"></div>
 </div>
 
 <h3>4. background-repeat: repeat-y</h3>
@@ -859,7 +881,7 @@ adjacent tiles indicates a tiling regression.
     height along the left edge, clipped on the bottom; no tiling
     rightward &#8212; the rest of the box to the right of the column shows
     only the plain background-color</div>
-  <div class="repeat-box" style="width: 60px; height: 103px; background-repeat: repeat-y;"></div>
+  <div class="repeat-box" style="width: 60px; padding-top: 103px; background-repeat: repeat-y;"></div>
 </div>
 
 <h3>5. background-repeat: no-repeat</h3>
@@ -868,7 +890,7 @@ adjacent tiles indicates a tiling regression.
     60&#215;60px box</div>
   <div class="note">expected: a single tile in the top-left corner only;
     the rest of the box shows only the plain background-color</div>
-  <div class="repeat-box" style="width: 60px; height: 60px; background-repeat: no-repeat;"></div>
+  <div class="repeat-box" style="width: 60px; padding-top: 60px; background-repeat: no-repeat;"></div>
 </div>
 
 <h3>6. background-repeat: repeat with an offset background-position</h3>
@@ -882,7 +904,7 @@ adjacent tiles indicates a tiling regression.
     the top, 10px-wide strips along the left), not just the right/bottom;
     this checks that tiling phase is computed from the resolved
     <code>background-position</code>, not just always anchored at 0,0</div>
-  <div class="repeat-box" style="width: 205px; height: 103px; background-repeat: repeat; background-position: 10px 10px;"></div>
+  <div class="repeat-box" style="width: 205px; padding-top: 103px; background-repeat: repeat; background-position: 10px 10px;"></div>
 </div>
 
 <h3>7. Case-insensitivity</h3>
@@ -891,7 +913,7 @@ adjacent tiles indicates a tiling regression.
     205&#215;60px box</div>
   <div class="note">expected: same as <code>repeat-x</code> (case 3):
     keywords are ASCII case-insensitive</div>
-  <div class="repeat-box" style="width: 205px; height: 60px; background-repeat: Repeat-X;"></div>
+  <div class="repeat-box" style="width: 205px; padding-top: 60px; background-repeat: Repeat-X;"></div>
 </div>
 
 </section>
