@@ -256,6 +256,23 @@ static void fillRoundedRectRing(LVDrawBuf & drawbuf, int x0, int y0, int x1, int
 // and not guaranteed present across all of crengine's cross-compilation targets.
 static const double CRE_PI = 3.14159265358979323846;
 
+// Fill a small circle (used for dotted-style dabs, so dots stay round on both
+// straight edges and curved corners instead of looking like axis-aligned boxes).
+static void fillCircle(LVDrawBuf & drawbuf, double cx, double cy, double r, lUInt32 color) {
+    if (r < 0.5) r = 0.5;
+    int ymin = (int)floor(cy - r);
+    int ymax = (int)ceil(cy + r);
+    for (int y = ymin; y < ymax; y++) {
+        double yy = (y + 0.5) - cy;
+        if (fabs(yy) > r) continue;
+        double dx = sqrt(std::max(0.0, r*r - yy*yy));
+        int xl = (int)floor(cx - dx + 0.5);
+        int xr = (int)floor(cx + dx + 0.5);
+        if (xl < xr)
+            drawbuf.FillRect(xl, y, xr, y+1, color);
+    }
+}
+
 // One segment of a rounded rect's perimeter: either a straight edge (point(d)
 // is linear in d, inward unit vector constant) or an elliptical corner arc
 // (point(d) looked up via a cumulative arc-length table over t in [t0,t1],
@@ -395,11 +412,21 @@ static void fillRoundedRectDashedRing(LVDrawBuf & drawbuf, int x0, int y0, int x
         iux = -nx; iuy = -ny; // inward = -outward normal
     };
 
-    // Flush one dash-on run [distStart, distEnd) (both are perimeter distances)
-    // as a sequence of ~1px-of-arc-length strips from the outer boundary inward
-    // by w, each sampled via pointAt so the strip follows the perimeter
-    // regardless of whether the run sits on an edge, an arc, or straddles both.
+    // Flush one dash-on run [distStart, distEnd) (both are perimeter distances).
+    // Dotted: one round dab at the run's true midpoint, via pointAt, so it's
+    // correctly placed even when the midpoint falls in a different segment
+    // than where the run started. Dashed: a sequence of ~1px-of-arc-length
+    // strips from the outer boundary inward by w, each sampled via pointAt so
+    // the strip follows the perimeter regardless of whether the run sits on an
+    // edge, an arc, or straddles both.
     auto flushRun = [&](double distStart, double distEnd) {
+        if (dotted) {
+            double mid = (distStart + distEnd) * 0.5;
+            double px, py, iux, iuy;
+            pointAt(mid, px, py, iux, iuy);
+            fillCircle(drawbuf, px + iux*w*0.5, py + iuy*w*0.5, w/2.0, color);
+            return;
+        }
         double d = distStart;
         double ppx, ppy, piux, piuy;
         pointAt(d, ppx, ppy, piux, piuy);
