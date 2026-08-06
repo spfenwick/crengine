@@ -252,6 +252,187 @@ static void fillRoundedRectRing(LVDrawBuf & drawbuf, int x0, int y0, int x1, int
     }
 }
 
+// Not relying on M_PI: it's a POSIX/glibc math.h extension, not standard C++,
+// and not guaranteed present across all of crengine's cross-compilation targets.
+static const double CRE_PI = 3.14159265358979323846;
+
+// One segment of a rounded rect's perimeter: either a straight edge (point(d)
+// is linear in d, inward unit vector constant) or an elliptical corner arc
+// (point(d) looked up via a cumulative arc-length table over t in [t0,t1],
+// inward unit vector is -outward normal, which varies along the arc).
+struct CRPerimeterSeg {
+    bool isArc;
+    double len;
+    // edge:
+    double ex0, ey0, dux, duy, iux, iuy;
+    // arc:
+    double cx, cy, crx, cry, t0, t1;
+    double cum[65];
+};
+
+static CRPerimeterSeg crMakeEdgeSeg(double ex0, double ey0, double ex1, double ey1, double iux, double iuy) {
+    CRPerimeterSeg sg;
+    sg.isArc = false;
+    double dx = ex1 - ex0, dy = ey1 - ey0;
+    sg.len = sqrt(dx*dx + dy*dy);
+    sg.ex0 = ex0; sg.ey0 = ey0;
+    sg.dux = sg.len > 0 ? dx / sg.len : 0.0;
+    sg.duy = sg.len > 0 ? dy / sg.len : 0.0;
+    sg.iux = iux; sg.iuy = iuy;
+    return sg;
+}
+
+// Builds the cumulative arc-length table (64 samples) used to map a local
+// distance along this arc back to an angle t -- there's no closed form for
+// ellipse arc length (it's an elliptic integral), so this polyline is how both
+// the segment's total length and any point on it get computed.
+static CRPerimeterSeg crMakeArcSeg(double cx, double cy, double crx, double cry, double t0, double t1) {
+    CRPerimeterSeg sg;
+    sg.isArc = true;
+    sg.cx = cx; sg.cy = cy; sg.crx = crx; sg.cry = cry; sg.t0 = t0; sg.t1 = t1;
+    sg.cum[0] = 0.0;
+    if (crx > 0.0 && cry > 0.0) {
+        double prevx = crx*cos(t0), prevy = cry*sin(t0);
+        for (int i = 1; i <= 64; i++) {
+            double t = t0 + (t1 - t0) * (double)i / 64.0;
+            double x = crx*cos(t), y = cry*sin(t);
+            double dx = x - prevx, dy = y - prevy;
+            sg.cum[i] = sg.cum[i-1] + sqrt(dx*dx + dy*dy);
+            prevx = x; prevy = y;
+        }
+    } else {
+        for (int i = 1; i <= 64; i++) sg.cum[i] = 0.0;
+    }
+    sg.len = sg.cum[64];
+    return sg;
+}
+
+// Draw a uniform-width dashed or dotted border ring around a rounded rect by
+// walking the *entire* perimeter (4 straight edges + 4 elliptical corner arcs)
+// as one continuous distance coordinate, and phasing the dash pattern off that
+// single coordinate.
+//
+// This exists because phasing left/right edges by row (y) and top/bottom edges
+// by column (x) independently -- as fillRoundedRectBorderSidesBand's dashed
+// counterpart does for the general/mixed-style case -- gives each axis its own
+// clock, with no shared origin, so dashes compress/stretch on the curve and
+// don't line up where an edge meets an arc.
+//
+// It's not enough to just track one cumulative arc-length value while visiting
+// the 8 segments in order, either: an earlier version of this function did
+// that but still ran a separate detect-a-run/flush-a-run loop *per segment*,
+// which forces a run boundary at every edge/arc transition regardless of the
+// true dash phase there. A run that actually straddles a seam got cut into two
+// dabs, both pulled unnaturally close to that seam. The fix is for the on/off
+// run detection itself to run once over the whole perimeter, via a single
+// point-lookup that already knows how to cross segment boundaries -- so a run
+// is only ever closed when the dash pattern actually goes off.
+static void fillRoundedRectDashedRing(LVDrawBuf & drawbuf, int x0, int y0, int x1, int y1,
+                                       const int rx[4], const int ry[4], int w, bool dotted, lUInt32 color)
+{
+    if (w <= 0)
+        return;
+    const int dash_len = dotted ? std::max(1, w) : std::max(1, 3*w);
+    const int gap_len = dash_len;
+    const int period = dash_len + gap_len;
+    auto is_on = [&](double pos) {
+        double p = fmod(pos, (double)period);
+        if (p < 0) p += period;
+        return p < dash_len;
+    };
+
+    // The band of thickness w grows from each edge towards the box interior:
+    // +y for the top edge, -y for the bottom edge, +x for the left edge, -x
+    // for the right edge. Order matches the clockwise walk below.
+    CRPerimeterSeg segs[8] = {
+        crMakeEdgeSeg(x0 + rx[0], y0, x1 - rx[1], y0, 0.0, +1.0),                    // top
+        crMakeArcSeg(x1 - rx[1], y0 + ry[1], rx[1], ry[1], -CRE_PI/2.0, 0.0),        // TR
+        crMakeEdgeSeg(x1, y0 + ry[1], x1, y1 - ry[2], -1.0, 0.0),                    // right
+        crMakeArcSeg(x1 - rx[2], y1 - ry[2], rx[2], ry[2], 0.0, CRE_PI/2.0),         // BR
+        crMakeEdgeSeg(x1 - rx[2], y1, x0 + rx[3], y1, 0.0, -1.0),                    // bottom
+        crMakeArcSeg(x0 + rx[3], y1 - ry[3], rx[3], ry[3], CRE_PI/2.0, CRE_PI),      // BL
+        crMakeEdgeSeg(x0, y1 - ry[3], x0, y0 + ry[0], +1.0, 0.0),                    // left
+        crMakeArcSeg(x0 + rx[0], y0 + ry[0], rx[0], ry[0], CRE_PI, 3.0*CRE_PI/2.0),  // TL
+    };
+    double prefix[9] = {0.0};
+    for (int i = 0; i < 8; i++) prefix[i+1] = prefix[i] + segs[i].len;
+    const double totalLen = prefix[8];
+    if (totalLen <= 0.0)
+        return;
+
+    // Point + inward unit vector at absolute perimeter distance d (wrapped into
+    // [0, totalLen)). This is what lets a dash run be sampled correctly even
+    // when it straddles two segments -- the lookup itself crosses the seam.
+    auto pointAt = [&](double d, double &px, double &py, double &iux, double &iuy) {
+        double dd = fmod(d, totalLen);
+        if (dd < 0) dd += totalLen;
+        int segIdx = 7;
+        for (int i = 0; i < 8; i++) {
+            if (dd <= prefix[i+1] || i == 7) { segIdx = i; break; }
+        }
+        double local = dd - prefix[segIdx];
+        const CRPerimeterSeg &sg = segs[segIdx];
+        if (local < 0) local = 0;
+        if (local > sg.len) local = sg.len;
+        if (!sg.isArc) {
+            px = sg.ex0 + sg.dux*local; py = sg.ey0 + sg.duy*local;
+            iux = sg.iux; iuy = sg.iuy;
+            return;
+        }
+        int lo = 0, hi = 64;
+        while (lo < hi) {
+            int mid = (lo + hi) / 2;
+            if (sg.cum[mid] < local) lo = mid + 1; else hi = mid;
+        }
+        int i1 = std::max(1, lo), i0 = i1 - 1;
+        double segStart = sg.cum[i0], segEnd = sg.cum[i1];
+        double frac = (segEnd > segStart) ? (local - segStart) / (segEnd - segStart) : 0.0;
+        double tt = sg.t0 + (sg.t1 - sg.t0) * ((double)i0 + frac) / 64.0;
+        px = sg.cx + sg.crx*cos(tt); py = sg.cy + sg.cry*sin(tt);
+        double nx = cos(tt)/sg.crx, ny = sin(tt)/sg.cry;
+        double nlen = sqrt(nx*nx + ny*ny);
+        if (nlen > 0) { nx /= nlen; ny /= nlen; }
+        iux = -nx; iuy = -ny; // inward = -outward normal
+    };
+
+    // Flush one dash-on run [distStart, distEnd) (both are perimeter distances)
+    // as a sequence of ~1px-of-arc-length strips from the outer boundary inward
+    // by w, each sampled via pointAt so the strip follows the perimeter
+    // regardless of whether the run sits on an edge, an arc, or straddles both.
+    auto flushRun = [&](double distStart, double distEnd) {
+        double d = distStart;
+        double ppx, ppy, piux, piuy;
+        pointAt(d, ppx, ppy, piux, piuy);
+        while (d < distEnd) {
+            double dn = std::min(distEnd, d + 1.0);
+            double npx, npy, niux, niuy;
+            pointAt(dn, npx, npy, niux, niuy);
+            double ix0 = ppx + piux*w, iy0 = ppy + piuy*w;
+            double ix1 = npx + niux*w, iy1 = npy + niuy*w;
+            int minx = (int)floor(std::min(std::min(ppx, npx), std::min(ix0, ix1)));
+            int maxx = (int)ceil (std::max(std::max(ppx, npx), std::max(ix0, ix1)));
+            int miny = (int)floor(std::min(std::min(ppy, npy), std::min(iy0, iy1)));
+            int maxy = (int)ceil (std::max(std::max(ppy, npy), std::max(iy0, iy1)));
+            drawbuf.FillRect(minx, miny, maxx, maxy, color);
+            d = dn; ppx = npx; ppy = npy; piux = niux; piuy = niuy;
+        }
+    };
+
+    // Single pass over the whole perimeter, ~1 device pixel of arc length per
+    // step, so a run is only closed when the dash pattern truly goes off.
+    const int totalSteps = std::max(1, (int)llround(totalLen));
+    int runStart = -1;
+    for (int i = 0; i <= totalSteps; i++) {
+        bool on = (i < totalSteps) && is_on((double)i);
+        if (on && runStart < 0) {
+            runStart = i;
+        } else if (!on && runStart >= 0) {
+            flushRun((double)runStart, (double)i);
+            runStart = -1;
+        }
+    }
+}
+
 // Compute the inner horizontal span [xl2, xr2) at scanline y for a rounded rectangle
 // inset per-side by w_top, w_right, w_bottom, w_left.
 static inline void computeInnerSpanPerSide(int y,
@@ -9858,6 +10039,17 @@ void DrawBorder(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int doc_x,int 
                 bool same_color = (topBordercolor==rightBordercolor && topBordercolor==bottomBordercolor && topBordercolor==leftBordercolor);
                 if (all_present && all_solid_like && same_width && same_color && tbw>0) {
                     fillRoundedRectRing(drawbuf, X0, Y0, X1, Y1, rx, ry, tbw, topBordercolor);
+                    return;
+                }
+
+                // Fast path: all four sides present, same DASHED-or-DOTTED style, same width
+                // and same color -> draw one continuous dashed/dotted ring, phased by arc
+                // length around the whole perimeter instead of by row/column per side (see
+                // fillRoundedRectDashedRing for why that matters at curved corners).
+                bool all_dashed_like = (side_is_dashed[0] && side_is_dashed[1] && side_is_dashed[2] && side_is_dashed[3])
+                                     || (side_is_dotted[0] && side_is_dotted[1] && side_is_dotted[2] && side_is_dotted[3]);
+                if (all_present && all_dashed_like && same_width && same_color && tbw>0) {
+                    fillRoundedRectDashedRing(drawbuf, X0, Y0, X1, Y1, rx, ry, tbw, side_is_dotted[0], topBordercolor);
                     return;
                 }
 
