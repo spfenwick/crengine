@@ -120,6 +120,22 @@ extern const int gDOMVersionCurrent;
 #define DEF_MIN_SPACE_CONDENSING_PERCENT 50
 #define DEF_UNUSED_SPACE_THRESHOLD_PERCENT 5
 #define DEF_MAX_ADDED_LETTER_SPACING_PERCENT 0
+#define DEF_LINE_BREAKING_MODE 0
+#define DEF_JUSTIFY_SPACE_SHRINK_PERCENT 34
+#define DEF_JUSTIFY_SPACE_STRETCH_PERCENT 25
+#define DEF_JUSTIFY_TRACKING_SHRINK_PERCENT 1
+#define DEF_JUSTIFY_TRACKING_STRETCH_PERCENT 0
+#define DEF_JUSTIFY_PRETOLERANCE 50
+#define DEF_JUSTIFY_TOLERANCE 500
+#define DEF_JUSTIFY_HYPHEN_PENALTY 25
+#define DEF_JUSTIFY_EX_HYPHEN_PENALTY 50
+#define DEF_JUSTIFY_LINE_PENALTY 10
+#define DEF_JUSTIFY_ADJ_DEMERITS 10000
+#define DEF_JUSTIFY_DOUBLE_HYPHEN_DEMERITS 3000
+#define DEF_JUSTIFY_FINAL_HYPHEN_DEMERITS 1500
+#define DEF_JUSTIFY_EMERGENCY_STRETCH_PERCENT 6
+#define DEF_JUSTIFY_LAST_LINE_MIN_PERCENT 33
+#define DEF_JUSTIFY_TRACKING_DELTA_MAX_BP 50
 #define DEF_CJK_WIDTH_SCALE_PERCENT 100
 
 #define NODE_DISPLAY_STYLE_HASH_UNINITIALIZED 0xFFFFFFFF
@@ -569,6 +585,22 @@ protected:
     int  _minSpaceCondensingPercent;
     int  _unusedSpaceThresholdPercent;
     int  _maxAddedLetterSpacingPercent;
+    int  _lineBreakingMode;
+    int  _justifySpaceShrinkPercent;
+    int  _justifySpaceStretchPercent;
+    int  _justifyTrackingShrinkPercent;
+    int  _justifyTrackingStretchPercent;
+    int  _justifyPretolerance;
+    int  _justifyTolerance;
+    int  _justifyHyphenPenalty;
+    int  _justifyExplicitHyphenPenalty;
+    int  _justifyLinePenalty;
+    int  _justifyAdjacentDemerits;
+    int  _justifyDoubleHyphenDemerits;
+    int  _justifyFinalHyphenDemerits;
+    int  _justifyEmergencyStretchPercent;
+    int  _justifyLastLineMinPercent;
+    int  _justifyTrackingDeltaMaxBp;
     int  _cjkWidthScalePercent;
 
     lUInt32 _nodeStyleHash;
@@ -670,6 +702,58 @@ public:
         _maxAddedLetterSpacingPercent = maxAddedLetterSpacingPercent;
         // This does not need to trigger a re-rendering, just
         // a re-formatting of the final blocks
+        _renderedBlockCache.clear();
+        return true;
+    }
+
+    bool setLineBreakingMode(int lineBreakingMode) {
+        if (lineBreakingMode == _lineBreakingMode)
+            return false;
+        _lineBreakingMode = lineBreakingMode;
+        _renderedBlockCache.clear();
+        return true;
+    }
+
+    bool setJustificationConfig(
+            int spaceShrinkPercent, int spaceStretchPercent,
+            int trackingShrinkPercent, int trackingStretchPercent,
+            int pretolerance, int tolerance,
+            int hyphenPenalty, int explicitHyphenPenalty,
+            int linePenalty, int adjacentDemerits,
+            int doubleHyphenDemerits, int finalHyphenDemerits,
+            int emergencyStretchPercent, int lastLineMinPercent,
+            int trackingDeltaMaxBp) {
+        if (spaceShrinkPercent == _justifySpaceShrinkPercent &&
+                spaceStretchPercent == _justifySpaceStretchPercent &&
+                trackingShrinkPercent == _justifyTrackingShrinkPercent &&
+                trackingStretchPercent == _justifyTrackingStretchPercent &&
+                pretolerance == _justifyPretolerance &&
+                tolerance == _justifyTolerance &&
+                hyphenPenalty == _justifyHyphenPenalty &&
+                explicitHyphenPenalty == _justifyExplicitHyphenPenalty &&
+                linePenalty == _justifyLinePenalty &&
+                adjacentDemerits == _justifyAdjacentDemerits &&
+                doubleHyphenDemerits == _justifyDoubleHyphenDemerits &&
+                finalHyphenDemerits == _justifyFinalHyphenDemerits &&
+                emergencyStretchPercent == _justifyEmergencyStretchPercent &&
+                lastLineMinPercent == _justifyLastLineMinPercent &&
+                trackingDeltaMaxBp == _justifyTrackingDeltaMaxBp)
+            return false;
+        _justifySpaceShrinkPercent = spaceShrinkPercent;
+        _justifySpaceStretchPercent = spaceStretchPercent;
+        _justifyTrackingShrinkPercent = trackingShrinkPercent;
+        _justifyTrackingStretchPercent = trackingStretchPercent;
+        _justifyPretolerance = pretolerance;
+        _justifyTolerance = tolerance;
+        _justifyHyphenPenalty = hyphenPenalty;
+        _justifyExplicitHyphenPenalty = explicitHyphenPenalty;
+        _justifyLinePenalty = linePenalty;
+        _justifyAdjacentDemerits = adjacentDemerits;
+        _justifyDoubleHyphenDemerits = doubleHyphenDemerits;
+        _justifyFinalHyphenDemerits = finalHyphenDemerits;
+        _justifyEmergencyStretchPercent = emergencyStretchPercent;
+        _justifyLastLineMinPercent = lastLineMinPercent;
+        _justifyTrackingDeltaMaxBp = trackingDeltaMaxBp;
         _renderedBlockCache.clear();
         return true;
     }

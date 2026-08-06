@@ -16,6 +16,11 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <vector>
+#include "crsetup.h"
 #include "../include/lvfnt.h"
 #include "../include/lvtextfm.h"
 #include "../include/lvdrawbuf.h"
@@ -41,6 +46,7 @@
 #define MIN_SPACE_CONDENSING_PERCENT 50
 #define UNUSED_SPACE_THRESHOLD_PERCENT 5
 #define MAX_ADDED_LETTER_SPACING_PERCENT 0
+#define LINE_BREAKING_MODE 0
 #define CJK_WIDTH_SCALE_PERCENT 100
 
 // to debug formatter
@@ -182,6 +188,22 @@ formatted_text_fragment_t * lvtextAllocFormatter( lUInt16 width )
     pbuffer->min_space_condensing_percent = MIN_SPACE_CONDENSING_PERCENT; // 50%
     pbuffer->unused_space_threshold_percent = UNUSED_SPACE_THRESHOLD_PERCENT; // 5%
     pbuffer->max_added_letter_spacing_percent = MAX_ADDED_LETTER_SPACING_PERCENT; // 0%
+    pbuffer->line_breaking_mode = LINE_BREAKING_MODE; // greedy
+    pbuffer->justify_space_shrink_percent = DEF_JUSTIFY_SPACE_SHRINK_PERCENT;
+    pbuffer->justify_space_stretch_percent = DEF_JUSTIFY_SPACE_STRETCH_PERCENT;
+    pbuffer->justify_tracking_shrink_percent = DEF_JUSTIFY_TRACKING_SHRINK_PERCENT;
+    pbuffer->justify_tracking_stretch_percent = DEF_JUSTIFY_TRACKING_STRETCH_PERCENT;
+    pbuffer->justify_pretolerance = DEF_JUSTIFY_PRETOLERANCE;
+    pbuffer->justify_tolerance = DEF_JUSTIFY_TOLERANCE;
+    pbuffer->justify_hyphen_penalty = DEF_JUSTIFY_HYPHEN_PENALTY;
+    pbuffer->justify_explicit_hyphen_penalty = DEF_JUSTIFY_EX_HYPHEN_PENALTY;
+    pbuffer->justify_line_penalty = DEF_JUSTIFY_LINE_PENALTY;
+    pbuffer->justify_adjacent_demerits = DEF_JUSTIFY_ADJ_DEMERITS;
+    pbuffer->justify_double_hyphen_demerits = DEF_JUSTIFY_DOUBLE_HYPHEN_DEMERITS;
+    pbuffer->justify_final_hyphen_demerits = DEF_JUSTIFY_FINAL_HYPHEN_DEMERITS;
+    pbuffer->justify_emergency_stretch_percent = DEF_JUSTIFY_EMERGENCY_STRETCH_PERCENT;
+    pbuffer->justify_last_line_min_percent = DEF_JUSTIFY_LAST_LINE_MIN_PERCENT;
+    pbuffer->justify_tracking_delta_max_bp = DEF_JUSTIFY_TRACKING_DELTA_MAX_BP;
     pbuffer->cjk_width_scale_percent = CJK_WIDTH_SCALE_PERCENT; // 100% (keep original width)
 
     return pbuffer;
@@ -440,6 +462,9 @@ public:
     int  m_usable_left_overflow;
     int  m_usable_right_overflow;
     bool m_hanging_punctuation;
+    bool m_using_optimal_breaks;
+    bool m_using_optimized_spacing;
+    bool m_mark_greedy_fallback;
     bool m_indent_first_line_done;
     int  m_indent_after_first_line;
     int  m_indent_current;
@@ -511,6 +536,9 @@ public:
         m_hanging_punctuation = false;
         m_formatted_initial_letter_id = 0;
         m_formatted_initial_letter_ink_end_y = 0;
+        m_using_optimal_breaks = false;
+        m_using_optimized_spacing = false;
+        m_mark_greedy_fallback = false;
         m_initial_letter_exclusion.active = false;
         m_initial_letter_exclusion.is_carried = false;
         m_initial_letter_exclusion.node_id = 0;
@@ -2751,8 +2779,288 @@ public:
 #define MIN_WORD_LEN_TO_HYPHENATE 4
 #define MAX_WORD_SIZE 64
 
+    int countDistributedTrackingPoints(formatted_line_t * frmline)
+    {
+        int points = 0;
+        for ( int i=0; i<(int)frmline->word_count; i++ ) {
+            formatted_word_t * word = &frmline->words[i];
+            if ( word->distinct_glyphs > 1 )
+                points += word->distinct_glyphs - 1;
+        }
+        return points;
+    }
+
     /// align line: add or reduce widths of spaces to achieve desired text alignment
-    void alignLine( formatted_line_t * frmline, int alignment, int rightIndent=0, bool hasInlineBoxes=false ) {
+    int applyDistributedTracking(formatted_line_t * frmline, int requested_width)
+    {
+        // Keep Max + = 0 a renderer-level invariant. Planner and word-space
+        // rounding should normally have removed any positive remainder, but
+        // no future fallback path may turn one into expanded letters.
+        if ( requested_width > 0 &&
+                m_pbuffer->justify_tracking_stretch_percent == 0 )
+            return 0;
+        int tracking_points = countDistributedTrackingPoints(frmline);
+        for ( int i=0; i<(int)frmline->word_count; i++ ) {
+            formatted_word_t * word = &frmline->words[i];
+            word->flags &= ~LTEXT_WORD_HAS_DISTRIBUTED_TRACKING;
+        }
+        if ( requested_width == 0 || tracking_points == 0 )
+            return 0;
+
+        int points_done = 0;
+        int shift_x = 0;
+        for ( int i=0; i<(int)frmline->word_count; i++ ) {
+            formatted_word_t * word = &frmline->words[i];
+            word->x += shift_x;
+            int points = word->distinct_glyphs > 1
+                    ? word->distinct_glyphs - 1 : 0;
+            int start_width = requested_width * points_done / tracking_points;
+            int end_width = requested_width * (points_done + points) /
+                    tracking_points;
+            int added = end_width - start_width;
+            if ( points > 0 ) {
+                word->flags |= LTEXT_WORD_HAS_DISTRIBUTED_TRACKING;
+                // Keep one accumulator for the full visual line. Restarting
+                // the division in every word concentrates a small remainder
+                // in one short word, making only that word look tracked out.
+                // alignLine() runs after vertical metrics are finalized, so
+                // these two existing scratch slots are free for draw metadata.
+                word->_top_to_baseline = requested_width;
+                word->_baseline_to_bottom = points_done;
+            }
+            word->width += added;
+            word->min_width += added;
+            shift_x += added;
+            points_done += points;
+        }
+        frmline->width += requested_width;
+        return requested_width;
+    }
+
+    int getNaturalWordSpaceWidth(formatted_word_t * word)
+    {
+        // Optimized addLine() temporarily carries the natural trailing-space
+        // width in this existing field; alignLine() clears it before Draw().
+        int natural = word->added_letter_spacing;
+        if ( natural <= 0 )
+            natural = std::max(1, word->width - word->min_width);
+        return natural;
+    }
+
+    int applyFixedWordSpacing(formatted_line_t * frmline, int target_space_width)
+    {
+        if ( target_space_width < 1 )
+            target_space_width = 1;
+        int shift_x = 0;
+        int total = 0;
+        for ( int i=0; i<(int)frmline->word_count; i++ ) {
+            formatted_word_t * word = &frmline->words[i];
+            word->x += shift_x;
+            if ( i < (int)frmline->word_count - 1 &&
+                    (word->flags & LTEXT_WORD_CAN_ADD_SPACE_AFTER) ) {
+                // Equal *adjustments* are not enough: fractional HarfBuzz
+                // measurement can round otherwise identical natural spaces
+                // to neighbouring integer widths. Set every actual trailing
+                // word space to one absolute width instead.
+                int delta = target_space_width -
+                        getNaturalWordSpaceWidth(word);
+                word->width += delta;
+                word->min_width += delta;
+                shift_x += delta;
+                total += delta;
+            }
+        }
+        frmline->width += total;
+        return total;
+    }
+
+    int getOpticalWordGapPadding(formatted_word_t * word,
+                                 formatted_word_t * next_word)
+    {
+        if ( !word || !next_word || word->distinct_glyphs <= 0 ||
+                next_word->distinct_glyphs <= 0 ||
+                (word->flags & (LTEXT_WORD_IS_IMAGE|LTEXT_WORD_IS_INLINE_BOX|
+                                LTEXT_WORD_IS_PAD)) ||
+                (next_word->flags & (LTEXT_WORD_IS_IMAGE|
+                                     LTEXT_WORD_IS_INLINE_BOX|
+                                     LTEXT_WORD_IS_PAD)) )
+            return 0;
+        src_text_fragment_t * src =
+                &m_pbuffer->srctext[word->src_text_index];
+        src_text_fragment_t * next_src =
+                &m_pbuffer->srctext[next_word->src_text_index];
+        LVFont * font = (LVFont *)src->t.font;
+        LVFont * next_font = (LVFont *)next_src->t.font;
+        if ( !font || !next_font || word->t.len == 0 ||
+                next_word->t.len == 0 )
+            return 0;
+
+        int last = word->t.start + word->t.len - 1;
+        while ( last >= word->t.start &&
+                (src->t.text[last] == ' ' || src->t.text[last] == '\t' ||
+                 src->t.text[last] == UNICODE_NO_BREAK_SPACE) )
+            last--;
+        int first = next_word->t.start;
+        int next_end = next_word->t.start + next_word->t.len;
+        while ( first < next_end &&
+                (next_src->t.text[first] == ' ' ||
+                 next_src->t.text[first] == '\t' ||
+                 next_src->t.text[first] == UNICODE_NO_BREAK_SPACE) )
+            first++;
+        if ( last < word->t.start || first >= next_end )
+            return 0;
+
+        // Positive side bearings are blank pixels already present between
+        // glyph ink and the nominal word-space advance; negative bearings let
+        // ink overhang into that advance. Equal visible gaps therefore need
+        // different advances when neighbouring edge glyphs differ.
+        int padding = font->getRightSideBearing(src->t.text[last]) +
+                      next_font->getLeftSideBearing(next_src->t.text[first]);
+        int limit = std::max(font->getSize(), next_font->getSize()) / 2;
+        return std::max(-limit, std::min(limit, padding));
+    }
+
+    int applyOpticalWordSpacing(formatted_line_t * frmline,
+                                int target_space_width)
+    {
+        int spaces = 0;
+        int padding_sum = 0;
+        for ( int i=0; i<(int)frmline->word_count-1; i++ ) {
+            formatted_word_t * word = &frmline->words[i];
+            if ( word->flags & LTEXT_WORD_CAN_ADD_SPACE_AFTER ) {
+                spaces++;
+                padding_sum += getOpticalWordGapPadding(
+                        word, &frmline->words[i+1]);
+            }
+        }
+        if ( spaces == 0 )
+            return 0;
+
+        const auto roundedDivision = [](long long value, int divisor) {
+            return value >= 0
+                    ? (int)((value + divisor / 2) / divisor)
+                    : (int)((value - divisor / 2) / divisor);
+        };
+        long long cumulative = 0;
+        int shift_x = 0;
+        int total = 0;
+        for ( int i=0; i<(int)frmline->word_count; i++ ) {
+            formatted_word_t * word = &frmline->words[i];
+            word->x += shift_x;
+            if ( i >= (int)frmline->word_count-1 ||
+                    !(word->flags & LTEXT_WORD_CAN_ADD_SPACE_AFTER) )
+                continue;
+            int padding = getOpticalWordGapPadding(
+                    word, &frmline->words[i+1]);
+            int before = roundedDivision(cumulative, spaces);
+            cumulative += padding_sum - (long long)padding * spaces;
+            int after = roundedDivision(cumulative, spaces);
+            int optical_space_width = std::max(1,
+                    target_space_width + after - before);
+            int delta = optical_space_width -
+                    getNaturalWordSpaceWidth(word);
+            word->width += delta;
+            word->min_width += delta;
+            shift_x += delta;
+            total += delta;
+        }
+        frmline->width += total;
+        return total;
+    }
+
+    int applyOptimizedJustification(formatted_line_t * frmline,
+                                    int extra_width,
+                                    bool optical_word_spacing)
+    {
+        int spaces = 0;
+        int natural_space_total = 0;
+        int min_common_space = 1;
+        int max_common_space = std::numeric_limits<int>::max();
+        for ( int i=0; i<(int)frmline->word_count-1; i++ ) {
+            formatted_word_t * word = &frmline->words[i];
+            if ( !(word->flags & LTEXT_WORD_CAN_ADD_SPACE_AFTER) )
+                continue;
+            spaces++;
+            int natural = getNaturalWordSpaceWidth(word);
+            natural_space_total += natural;
+            int shrink = std::min(natural > 1 ? natural - 1 : 0,
+                    natural * m_pbuffer->justify_space_shrink_percent / 100);
+            int stretch = natural *
+                    m_pbuffer->justify_space_stretch_percent / 100;
+            min_common_space = std::max(min_common_space,
+                    natural - shrink);
+            max_common_space = std::min(max_common_space,
+                    natural + stretch);
+        }
+        if ( spaces == 0 ) {
+            // A positive limit of zero is a direction invariant, not merely
+            // a planner preference. With no word gaps available, leave the
+            // line short instead of silently expanding letters.
+            if ( extra_width > 0 &&
+                    m_pbuffer->justify_tracking_stretch_percent == 0 )
+                return 0;
+            return applyDistributedTracking(frmline, extra_width);
+        }
+
+        // Pick one absolute space width. The closest integer target keeps the
+        // residual microtracking minimal. Configured word-space bounds are
+        // respected whenever all spaces have a common feasible interval.
+        int desired_space_total = natural_space_total + extra_width;
+        int target_space = (desired_space_total + spaces / 2) / spaces;
+        target_space = std::max(1, target_space);
+        if ( min_common_space <= max_common_space )
+            target_space = std::max(min_common_space,
+                    std::min(max_common_space, target_space));
+
+        int tracking_points = countDistributedTrackingPoints(frmline);
+        int predicted_applied = target_space * spaces - natural_space_total;
+        int tracking_stretch_capacity = frmline->width *
+                m_pbuffer->justify_tracking_stretch_percent / 100;
+        if ( predicted_applied + tracking_stretch_capacity < extra_width ) {
+            // Put any positive remainder beyond the configured tracking
+            // capacity into the equal word gaps. In Never Expand mode the
+            // capacity is zero; with positive tracking enabled, retain only
+            // the bounded amount for distributed tracking.
+            int raise_by = (extra_width - predicted_applied -
+                    tracking_stretch_capacity + spaces - 1) / spaces;
+            target_space += raise_by;
+            predicted_applied =
+                    target_space * spaces - natural_space_total;
+
+            int tracking_shrink_capacity = frmline->width *
+                    m_pbuffer->justify_tracking_shrink_percent / 100;
+            if ( predicted_applied - extra_width >
+                    tracking_shrink_capacity ) {
+                // Exact width would need too much contraction. Use the next
+                // lower equal word-space width and accept a subpixel-short
+                // line; never replace it with positive letter spacing.
+                target_space = std::max(1, target_space - 1);
+                predicted_applied =
+                        target_space * spaces - natural_space_total;
+            }
+        }
+        if ( tracking_points == 0 && predicted_applied > extra_width ) {
+            // There is no subpixel sink for an indivisible negative
+            // remainder. Bias the common word space downward: a slightly
+            // short line is acceptable, crossing the margin is not.
+            int lower_by = (predicted_applied - extra_width + spaces - 1) /
+                    spaces;
+            target_space = std::max(1, target_space - lower_by);
+        }
+        int applied = optical_word_spacing
+                ? applyOpticalWordSpacing(frmline, target_space)
+                : applyFixedWordSpacing(frmline, target_space);
+        int remaining = extra_width - applied;
+        if ( remaining > 0 &&
+                m_pbuffer->justify_tracking_stretch_percent == 0 )
+            return applied;
+        if ( remaining != 0 && tracking_points > 0 )
+            applied += applyDistributedTracking(frmline, remaining);
+        return applied;
+    }
+
+    void alignLine( formatted_line_t * frmline, int alignment, int rightIndent=0,
+                    bool hasInlineBoxes=false, bool first=false ) {
         // Fetch current line x offset and max width
         int x_offset;
         int width = getAvailableWidthAtY(m_y, m_pbuffer->strut_height, x_offset);
@@ -2803,6 +3111,14 @@ public:
             }
             formatted_word_t * prev_word = &frmline->words[i-1];
             if ( prev_word->src_text_index == word->src_text_index ) { // same text node
+                continue;
+            }
+            if ( prev_word->flags & LTEXT_WORD_CAN_ADD_SPACE_AFTER ) {
+                // A real word space already separates these source fragments.
+                // Boundary overlap correction is only useful for directly
+                // touching glyphs (for example, roman text meeting italic
+                // punctuation). Applying it across a space makes that one gap
+                // wider than every other normalized gap on an optimized line.
                 continue;
             }
             if ( prev_word->distinct_glyphs <= 0 || word->distinct_glyphs <= 0 ) {
@@ -2963,7 +3279,7 @@ public:
                 prev_word->width += shift_x;
                 prev_word->min_width += shift_x;
                 // To see where correction is done, show some overline on the word (also uncomment it in LFormattedText::Draw())
-                // word->flags |= LTEXT_WORD__AVAILABLE_BIT_16__;
+                // A dedicated debug flag could be set here to visualize corrections.
             }
             frmline->width += added_x;
             extra_width = usable_width - frmline->width;
@@ -2971,7 +3287,8 @@ public:
 
         // We might want to prevent this when LangCfg == "de" (in german,
         // letter spacing is used for emphasis)
-        if ( m_pbuffer->max_added_letter_spacing_percent > 0 // only if allowed
+        if ( !m_using_optimized_spacing &&
+                        m_pbuffer->max_added_letter_spacing_percent > 0 // only if allowed
                         && alignment == LTEXT_ALIGN_WIDTH    // only when justifying
                         && frmline->word_count > 1           // not if single word (expanded, but not taking the full width is ugly)
                         && 100 * extra_width > m_pbuffer->unused_space_threshold_percent * usable_width ) {
@@ -3093,6 +3410,25 @@ public:
         }
         extra_width = usable_width - frmline->width;
 
+        bool optimized_adjustment = m_using_optimized_spacing &&
+                alignment == LTEXT_ALIGN_WIDTH && !m_has_cjk && !m_has_bidi &&
+                frmline->word_count > 1;
+        if ( optimized_adjustment ) {
+            applyOptimizedJustification(frmline, extra_width,
+                    m_pbuffer->line_breaking_mode == 2);
+            extra_width = usable_width - frmline->width;
+        }
+        // Optimized addLine() temporarily carries each word's natural
+        // trailing-space width in added_letter_spacing. It is draw metadata
+        // in the normal formatter, so clear the carrier on every optimized
+        // line, including a paragraph's ragged (left-aligned) final line.
+        // Leaving it set there makes Draw() spread the letters inside each
+        // word by the width of a space while word positions stay unchanged.
+        if ( m_using_optimized_spacing ) {
+            for ( int i=0; i<(int)frmline->word_count; i++ )
+                frmline->words[i].added_letter_spacing = 0;
+        }
+
         if ( m_has_cjk && extra_width < 0 && frmline->word_count > 1
                     && frmline->words[frmline->word_count-1].flags & LTEXT_WORD_IS_FLEXIBLE_WIDTH_CJK ) {
             // Line too wide (some space reduction is needed) and the last word is a flexible CJK.
@@ -3115,7 +3451,7 @@ public:
             }
         }
 
-        if ( extra_width < 0 ) {
+        if ( extra_width < 0 && !optimized_adjustment ) {
             // line is too wide
             // reduce spaces to fit line
             int extraSpace = -extra_width;
@@ -3217,7 +3553,7 @@ public:
                 m_cjk_prev_line_added_space_div = 0;
                 m_cjk_prev_line_added_space_mod = 0;
             }
-            if ( extra_width > 0 ) {
+            if ( extra_width > 0 && !optimized_adjustment ) {
                 // distribute additional space
                 int extraSpace = extra_width;
                 int addSpacePoints = 0;
@@ -3674,6 +4010,8 @@ public:
             // Might be useful (we may have a bidi line in a LTR paragraph).
             // (Used for ordering in-page footnote links)
         }
+        if ( first && m_mark_greedy_fallback )
+            frmline->flags |= LTEXT_LINE_GREEDY_FALLBACK;
 
         if ( preFormattedOnly && (start == end) ) {
             // Specific for preformatted text when consecutive \n\n:
@@ -4410,6 +4748,9 @@ public:
                     bool preformatted = srcline->flags & LTEXT_FLAG_PREFORMATTED;
                     if ( m_flags[i-1] & LCHAR_IS_SPACE ) {
                         // Current word ends with a space.
+                        if ( m_using_optimized_spacing )
+                            word->added_letter_spacing = m_widths[i-1] -
+                                    (i > 1 ? m_widths[i-2] : 0);
                         // Each word ending with a space (except in some conditions) can
                         // have its width reduced by a fraction of this space width or
                         // increased if needed (for text justification), so actually
@@ -4573,6 +4914,7 @@ public:
                             // and so leak on the right. We were previously also correcting only
                             // overflows and not underflows.)
                             word->width += right_overflow;
+                            frmline->width_overflow = 0;
                         }
                         else {
                             // We prevent hanging punctuation in a few cases (see above)
@@ -4884,7 +5226,7 @@ public:
 
         if ( !light_formatting ) {
             // Fix up words position and width to ensure requested alignment and indent
-            alignLine( frmline, align, rightIndent, hasInlineBoxes );
+            alignLine( frmline, align, rightIndent, hasInlineBoxes, first );
         }
 
         if ( initial_letter_word_index >= 0 ) {
@@ -4955,10 +5297,942 @@ public:
 
     }
 
+    struct OptimalBreakCandidate {
+        int pos;
+        bool hyphenated;
+        bool flagged;
+        int penalty;
+        OptimalBreakCandidate(int p, bool h, bool f, int v)
+            : pos(p), hyphenated(h), flagged(f), penalty(v) {}
+    };
+
+    struct OptimalLineBreak {
+        int pos;
+        bool hyphenated;
+        OptimalLineBreak(int p, bool h) : pos(p), hyphenated(h) {}
+    };
+
+    struct OptimalLineTexture {
+        int ink_density_basis_points;
+        int common_space_width;
+        OptimalLineTexture()
+            : ink_density_basis_points(0), common_space_width(0) {}
+    };
+
+    int optimalTextureRatioDelta(int first, int second) {
+        int average = std::max(1, (first + second) / 2);
+        long long delta = (long long)std::abs(first - second) * 10000 /
+                          average;
+        return (int)std::min((long long)10000, delta);
+    }
+
+    int optimalRiverAlignment(const std::vector<int> & first,
+                              const std::vector<int> & second,
+                              const std::vector<int> & gaussian_kernel) {
+        if ( first.empty() || second.empty() )
+            return 0;
+        long long total = 0;
+        int count = 0;
+        for ( int direction=0; direction<2; direction++ ) {
+            const std::vector<int> & source = direction == 0 ? first : second;
+            const std::vector<int> & target = direction == 0 ? second : first;
+            size_t nearest_index = 0;
+            for ( size_t i=0; i<source.size(); i++ ) {
+                while ( nearest_index + 1 < target.size() &&
+                        std::abs(source[i] - target[nearest_index+1]) <=
+                        std::abs(source[i] - target[nearest_index]) )
+                    nearest_index++;
+                int nearest = std::abs(
+                        source[i] - target[nearest_index]);
+                if ( nearest < (int)gaussian_kernel.size() )
+                    total += gaussian_kernel[nearest];
+                count++;
+            }
+        }
+        return count > 0 ? (int)((total + count / 2) / count) : 0;
+    }
+
+    void getOptimalGapCenters(int line_start, int capacity_end,
+                              int width_before, int line_x,
+                              int common_space_width,
+                              int tracking_adjustment, int natural_width,
+                              std::vector<int> & centers) {
+        centers.clear();
+        if ( common_space_width <= 0 )
+            return;
+        int prior_space_adjustment = 0;
+        for ( int i=line_start; i<capacity_end; i++ ) {
+            if ( !(m_flags[i] & LCHAR_IS_SPACE) ||
+                    (m_flags[i] & (LCHAR_LOCKED_SPACING|
+                                   LCHAR_IS_COLLAPSED_SPACE)) ||
+                    (i+1 < m_length && (m_flags[i+1] & LCHAR_IS_SPACE)) )
+                continue;
+            int natural_before = i > line_start
+                    ? m_widths[i-1] - width_before : 0;
+            int tracking_before = natural_width > 0
+                    ? (int)((long long)tracking_adjustment * natural_before /
+                            natural_width) : 0;
+            centers.push_back(line_x + natural_before +
+                    prior_space_adjustment + tracking_before +
+                    common_space_width / 2);
+            int source_width = m_widths[i] -
+                    (i > 0 ? m_widths[i-1] : 0);
+            prior_space_adjustment += common_space_width - source_width;
+        }
+    }
+
+    bool isOptimizableFootnoteInlineBox(src_text_fragment_t * src) {
+        if ( !src || !(src->flags & LTEXT_SRC_IS_OBJECT) ||
+                !(src->o.objflags & LTEXT_OBJECT_IS_INLINE_BOX) ||
+                !src->object || !m_pbuffer->inlineboxes_links )
+            return false;
+        lString32Collection * links;
+        lUInt32 key = ((ldomNode *)src->object)->getDataIndex();
+        return m_pbuffer->inlineboxes_links->get(key, links) &&
+                links && links->length() > 0;
+    }
+
+    bool canOptimizeParagraph(src_text_fragment_t * para, bool preFormattedOnly) {
+        if ( preFormattedOnly || m_length < 1 || m_length > 4096 )
+            return false;
+        if ( (para->flags & LTEXT_FLAG_NEWLINE) != LTEXT_ALIGN_WIDTH ||
+                (para->flags & LTEXT_LEGACY_RENDERING) )
+            return false;
+        if ( m_has_bidi || m_para_dir_is_rtl || m_has_cjk || m_has_images ||
+                m_has_float_to_position || m_has_ongoing_float ||
+                m_initial_letter_exclusion.active )
+            return false;
+        // A changing width would invalidate paragraph-wide decisions. This also
+        // excludes outer floats that are not represented in this paragraph.
+        if ( getCurrentLineX() != 0 || getCurrentLineWidth() != m_pbuffer->width )
+            return false;
+        std::vector<std::pair<LVFont *, lChar32> > checked_glyphs;
+        checked_glyphs.reserve(64);
+        for ( int i=0; i<m_length; i++ ) {
+            if ( m_text[i] == '\n' ||
+                    (m_flags[i] & (LCHAR_IS_CJK|LCHAR_IS_FLEXIBLE_WIDTH_CJK)) )
+                return false;
+            src_text_fragment_t * src = m_srcs[i];
+            if ( m_flags[i] & LCHAR_IS_OBJECT ) {
+                if ( !isOptimizableFootnoteInlineBox(src) )
+                    return false;
+                continue;
+            }
+            if ( !src || (src->flags & (LTEXT_SRC_IS_OBJECT|LTEXT_FLAG_PREFORMATTED|
+                                        LTEXT_FLAG_NOWRAP|LTEXT_LOCKED_SPACING|
+                                        LTEXT_IS_FIRST_LINE_CLONE)) )
+                return false;
+            if ( m_kerning_mode == KERNING_MODE_HARFBUZZ &&
+                    !(m_flags[i] & LCHAR_IS_SPACE) ) {
+                LVFont * font = (LVFont *)src->t.font;
+                if ( !font )
+                    return false;
+                std::pair<LVFont *, lChar32> key(font, m_text[i]);
+                std::vector<std::pair<LVFont *, lChar32> >::iterator found =
+                        std::lower_bound(checked_glyphs.begin(),
+                                         checked_glyphs.end(), key);
+                if ( found == checked_glyphs.end() || *found != key ) {
+                    LVFont::glyph_info_t glyph;
+                    if ( !font->getGlyphInfo(m_text[i], &glyph, 0) )
+                        return false;
+                    checked_glyphs.insert(found, key);
+                }
+            }
+        }
+        return true;
+    }
+
+    void findParagraphHyphenation(std::vector<bool> & hyphenation) {
+        hyphenation.assign(m_length, false);
+        int wordpos = m_length - 1;
+        while ( wordpos >= 0 ) {
+            int wstart, wend;
+            bool has_rtl;
+            lStr_findWordBounds(m_text, m_length, wordpos, wstart, wend, has_rtl);
+            if ( wend <= 0 )
+                break;
+            int len = wend - wstart;
+            if ( len >= MIN_WORD_LEN_TO_HYPHENATE && !has_rtl && wstart < wordpos + 1 ) {
+                bool contains_object = false;
+                for ( int i=wstart; i<wend; i++ ) {
+                    if ( m_flags[i] & LCHAR_IS_OBJECT ) {
+                        contains_object = true;
+                        break;
+                    }
+                }
+                // A footnote marker is an opaque atom and is commonly glued
+                // directly to the preceding word. Never feed that mixed range
+                // to the text hyphenator or interpret the object's union as a
+                // font pointer.
+                if ( contains_object ) {
+                    if ( wstart <= 0 )
+                        break;
+                    wordpos = wstart - 1;
+                    continue;
+                }
+                if ( len > MAX_WORD_SIZE )
+                    len = MAX_WORD_SIZE;
+                src_text_fragment_t * src = m_srcs[wstart];
+                if ( src && (src->flags & LTEXT_HYPHENATE) &&
+                        !(src->flags & LTEXT_FLAG_NOWRAP) ) {
+                    lUInt16 widths[MAX_WORD_SIZE];
+                    lUInt16 flags[MAX_WORD_SIZE];
+                    memset(flags, 0, sizeof(flags));
+                    int word_start_width = wstart > 0 ? m_widths[wstart-1] : 0;
+                    for ( int i=0; i<len; i++ ) {
+                        int width = m_widths[wstart+i] - word_start_width;
+                        widths[i] = width < 0xFFFF ? width : 0xFFFF;
+                    }
+                    LVFont * font = (LVFont *)src->t.font;
+                    int hyphen_width = font ? font->getHyphenWidth() : 0;
+                    src->lang_cfg->getHyphMethod()->hyphenate(
+                            m_text+wstart, len, widths, (lUInt8 *)flags,
+                            hyphen_width, 0xFFFF, 2);
+                    for ( int i=0; i<len; i++ ) {
+                        if ( flags[i] & LCHAR_ALLOW_HYPH_WRAP_AFTER )
+                            hyphenation[wstart+i] = true;
+                    }
+                }
+            }
+            if ( wstart <= 0 )
+                break;
+            wordpos = wstart - 1;
+        }
+    }
+
+    int optimalLineFitness(int diff, int capacity) {
+        if ( diff == 0 )
+            return 1;
+        double ratio = capacity > 0 ? (double)diff / (double)capacity : 2.0;
+        if ( ratio < -0.5 )
+            return 0; // tight
+        if ( ratio <= 0.5 )
+            return 1; // normal
+        if ( ratio <= 1.0 )
+            return 2; // loose
+        return 3; // very loose
+    }
+
+    int optimalLineBadness(int diff, int capacity) {
+        if ( diff == 0 )
+            return 0;
+        if ( capacity <= 0 )
+            return 10000;
+        double ratio = (double)(diff < 0 ? -diff : diff) / (double)capacity;
+        int badness = (int)(100.0 * ratio * ratio * ratio + 0.5);
+        return badness < 10000 ? badness : 10000;
+    }
+
+    int getOptimalHangingWidth(int line_start, int line_end, bool hyphenated) {
+        if ( !m_hanging_punctuation || line_start > line_end )
+            return 0;
+
+        int first_char = line_start;
+        while ( first_char <= line_end &&
+                (m_flags[first_char] & (LCHAR_IS_SPACE|LCHAR_IS_COLLAPSED_SPACE|LCHAR_IS_TO_IGNORE)) )
+            first_char++;
+        int last_char = line_end;
+        while ( last_char >= first_char &&
+                (m_flags[last_char] & (LCHAR_IS_SPACE|LCHAR_IS_COLLAPSED_SPACE|LCHAR_IS_TO_IGNORE)) )
+            last_char--;
+        if ( first_char > last_char )
+            return 0;
+
+        int usable_left_overflow;
+        int usable_right_overflow;
+        getCurrentLineUsableOverflows(usable_left_overflow, usable_right_overflow);
+        int hanging_width = 0;
+
+        src_text_fragment_t * first_src = m_srcs[first_char];
+        LVFont * first_font = first_src &&
+                !(m_flags[first_char] & LCHAR_IS_OBJECT)
+                ? (LVFont *)first_src->t.font : NULL;
+        if ( first_font && !(m_flags[first_char] & LCHAR_LOCKED_SPACING) &&
+                first_font->getFontFamily() != css_ff_monospace ) {
+            int lsb = first_font->getLeftSideBearing(m_text[first_char]);
+            int left_overflow = lsb < 0 ? -lsb : 0;
+            bool check_font;
+            int percent = first_src->lang_cfg->getHangingPercent(
+                    false, m_para_dir_is_rtl, check_font, m_text,
+                    first_char, line_end-first_char);
+            if ( percent && check_font && left_overflow > 0 )
+                percent = 0;
+            int shift = 0;
+            if ( percent ) {
+                int char_width = m_widths[first_char] -
+                        (first_char > 0 ? m_widths[first_char-1] : 0);
+                shift = char_width * percent / 100;
+                if ( shift == 0 )
+                    shift = 1;
+                if ( char_width > 0.9 * first_font->getSize() &&
+                        lsb > 0.4 * char_width )
+                    shift = 0;
+            }
+            if ( shift - lsb > usable_left_overflow )
+                shift = usable_left_overflow + lsb;
+            if ( shift > 0 )
+                hanging_width += shift;
+        }
+
+        src_text_fragment_t * last_src = m_srcs[last_char];
+        LVFont * last_font = last_src &&
+                !(m_flags[last_char] & LCHAR_IS_OBJECT)
+                ? (LVFont *)last_src->t.font : NULL;
+        if ( last_font && last_font->getFontFamily() != css_ff_monospace ) {
+            int rsb = hyphenated ? 0 : last_font->getRightSideBearing(m_text[last_char]);
+            int right_overflow = rsb < 0 ? -rsb : 0;
+            int shift = 0;
+            if ( hyphenated ) {
+                int percent = last_src->lang_cfg->getHyphenHangingPercent();
+                if ( percent ) {
+                    shift = last_font->getHyphenWidth() * percent / 100;
+                    if ( shift == 0 )
+                        shift = 1;
+                }
+            }
+            else {
+                bool check_font;
+                int percent = last_src->lang_cfg->getHangingPercent(
+                        true, m_para_dir_is_rtl, check_font, m_text,
+                        last_char, line_end-last_char);
+                if ( percent && check_font && right_overflow > 0 )
+                    percent = 0;
+                if ( percent ) {
+                    int char_width = m_widths[last_char] -
+                            (last_char > 0 ? m_widths[last_char-1] : 0);
+                    shift = char_width * percent / 100;
+                    if ( shift == 0 )
+                        shift = 1;
+                    if ( char_width > 0.9 * last_font->getSize() &&
+                            rsb > 0.4 * char_width )
+                        shift = 0;
+                }
+            }
+            if ( shift - rsb > usable_right_overflow )
+                shift = usable_right_overflow + rsb;
+            if ( shift > 0 )
+                hanging_width += shift;
+        }
+        return hanging_width;
+    }
+
+    bool buildOptimalBreaks(src_text_fragment_t * para,
+                            std::vector<OptimalLineBreak> & result,
+                            bool allow_hyphens, int tolerance,
+                            bool allow_emergency_stretch,
+                            bool force_quality_fallback,
+                            const std::vector<bool> * hyphenation,
+                            long long * result_cost = NULL) {
+        std::vector<OptimalBreakCandidate> candidates;
+        candidates.reserve(m_length / 2 + 8);
+        for ( int i=0; i<m_length; i++ ) {
+            if ( i == m_length-1 ) {
+                candidates.push_back(OptimalBreakCandidate(i, false, false, 0));
+                break;
+            }
+            bool normal_wrap = (m_flags[i] & LCHAR_ALLOW_WRAP_AFTER) &&
+                    !(m_flags[i] & LCHAR_DEPRECATED_WRAP_AFTER);
+            if ( normal_wrap ) {
+                bool explicit_hyphen = m_text[i] == '-' ||
+                        m_text[i] == UNICODE_HYPHEN;
+                candidates.push_back(OptimalBreakCandidate(i, false,
+                        explicit_hyphen, 0));
+            }
+            if ( allow_hyphens && hyphenation && (*hyphenation)[i] &&
+                    !normal_wrap ) {
+                candidates.push_back(OptimalBreakCandidate(i, true, true, 0));
+            }
+        }
+        if ( candidates.empty() )
+            return false;
+
+        // The renderer gives every adjustable word gap one absolute width.
+        // Keep the sum of natural widths and the intersection of all allowed
+        // absolute-width intervals so the planner models that exact operation,
+        // rather than merely applying the same delta to unlike natural spaces.
+        std::vector<int> space_count_prefix(m_length + 1, 0);
+        std::vector<int> space_width_prefix(m_length + 1, 0);
+        int capacity_tree_size = 1;
+        while ( capacity_tree_size < m_length )
+            capacity_tree_size <<= 1;
+        const int CAPACITY_INF = std::numeric_limits<int>::max() / 4;
+        std::vector<int> minimum_space_max_tree(capacity_tree_size * 2,
+                                                -CAPACITY_INF);
+        std::vector<int> maximum_space_min_tree(capacity_tree_size * 2,
+                                                CAPACITY_INF);
+        for ( int i=0; i<m_length; i++ ) {
+            space_count_prefix[i+1] = space_count_prefix[i];
+            space_width_prefix[i+1] = space_width_prefix[i];
+            if ( (m_flags[i] & LCHAR_IS_SPACE) &&
+                    !(m_flags[i] & (LCHAR_LOCKED_SPACING|LCHAR_IS_COLLAPSED_SPACE)) &&
+                    (i+1 >= m_length || !(m_flags[i+1] & LCHAR_IS_SPACE)) ) {
+                int width = m_widths[i] - (i > 0 ? m_widths[i-1] : 0);
+                space_count_prefix[i+1]++;
+                space_width_prefix[i+1] += width;
+                int shrink = std::min(width > 1 ? width - 1 : 0,
+                        width * m_pbuffer->justify_space_shrink_percent / 100);
+                int stretch = width *
+                        m_pbuffer->justify_space_stretch_percent / 100;
+                minimum_space_max_tree[capacity_tree_size+i] =
+                        width - shrink;
+                maximum_space_min_tree[capacity_tree_size+i] =
+                        width + stretch;
+            }
+        }
+        for ( int i=capacity_tree_size-1; i>0; i-- ) {
+            minimum_space_max_tree[i] =
+                    std::max(minimum_space_max_tree[i*2],
+                             minimum_space_max_tree[i*2+1]);
+            maximum_space_min_tree[i] =
+                    std::min(maximum_space_min_tree[i*2],
+                             maximum_space_min_tree[i*2+1]);
+        }
+        const auto rangeMaximum = [capacity_tree_size, CAPACITY_INF](
+                const std::vector<int> & tree, int left, int right) {
+            int value = -CAPACITY_INF;
+            for ( left += capacity_tree_size, right += capacity_tree_size;
+                    left < right; left >>= 1, right >>= 1 ) {
+                if ( left & 1 )
+                    value = std::max(value, tree[left++]);
+                if ( right & 1 )
+                    value = std::max(value, tree[--right]);
+            }
+            return value;
+        };
+        const auto rangeMinimum = [capacity_tree_size, CAPACITY_INF](
+                const std::vector<int> & tree, int left, int right) {
+            int value = CAPACITY_INF;
+            for ( left += capacity_tree_size, right += capacity_tree_size;
+                    left < right; left >>= 1, right >>= 1 ) {
+                if ( left & 1 )
+                    value = std::min(value, tree[left++]);
+                if ( right & 1 )
+                    value = std::min(value, tree[--right]);
+            }
+            return value;
+        };
+
+        const long long INF = std::numeric_limits<long long>::max() / 8;
+        size_t state_count = candidates.size() * 4;
+        std::vector<long long> cost(state_count, INF);
+        std::vector<int> previous_candidate(state_count, -2);
+        std::vector<int> previous_fitness(state_count, -1);
+        std::vector<int> last_tracking_basis_points(state_count, 0);
+        const int NO_WORD_SPACE_GUIDE = std::numeric_limits<int>::max();
+        std::vector<int> last_word_space_basis_points(
+                state_count, NO_WORD_SPACE_GUIDE);
+        std::vector<int> last_ink_density_basis_points(state_count, 0);
+        std::vector<int> last_common_space_width(state_count, 0);
+        std::vector<std::vector<int> > last_gap_centers(state_count);
+        // The raw 30/30/10 transition penalty spans 0..700000. Scale it to
+        // the same useful order of magnitude as TeX line demerits: a visible
+        // texture improvement can decide between similarly sound lines, but
+        // cannot buy a path made from grossly bad or emergency-stretched
+        // lines. Equal word spacing is the missing 30% and is already a hard
+        // invariant of every edge admitted to this graph.
+        const int TEXTURE_SEARCH_DIVISOR = 100;
+        // Falling below the configured ending minimum is a paragraph-level
+        // quality class, not a small texture trade-off. Give every such path
+        // the same dominant tier cost, then retain the graded deficit below.
+        // If all endings are short (for example with a 100% preference), the
+        // common tier cancels and the ordinary TeX costs still choose between
+        // them. This prevents a smoother middle from buying a one-word widow.
+        const long long SHORT_FINAL_LINE_DEMERITS = 1LL << 40;
+
+        int regular_width = getCurrentLineWidth();
+        double river_sigma = std::max(1.0,
+                m_pbuffer->strut_height * 0.35);
+        double river_divisor = 2.0 * river_sigma * river_sigma;
+        int river_kernel_limit = (int)std::ceil(4.0 * river_sigma);
+        std::vector<int> river_gaussian_kernel(river_kernel_limit + 1);
+        // exp(-d^2/divisor) has the recurrence q^(d^2), with the
+        // step multiplier advancing by q^2. One transcendental call per
+        // graph is substantially cheaper than one per integer distance.
+        double river_value = 1.0;
+        double river_step = std::exp(-1.0 / river_divisor);
+        double river_step_multiplier = river_step * river_step;
+        for ( int distance=0; distance<=river_kernel_limit; distance++ ) {
+            river_gaussian_kernel[distance] =
+                    (int)(10000.0 * river_value + 0.5);
+            river_value *= river_step;
+            river_step *= river_step_multiplier;
+        }
+        int first_indent = m_indent_current;
+        int following_indent = m_indent_first_line_done ? m_indent_current
+                                                        : m_indent_after_first_line;
+        bool if_not_first = para->flags & LTEXT_LAST_LINE_IF_NOT_FIRST;
+        int last_align = (para->flags >> LTEXT_LAST_LINE_ALIGN_SHIFT) & LTEXT_FLAG_NEWLINE;
+
+        for ( size_t current=0; current<candidates.size(); current++ ) {
+            const OptimalBreakCandidate & cur = candidates[current];
+            // Visit starts from nearest to farthest. Once a line is wider
+            // than its complete space + tracking contraction capacity, every
+            // earlier non-first start is wider still, so the remaining
+            // quadratic tail cannot contribute an edge to the graph.
+            for ( int previous=(int)current-1; previous>=-1; previous-- ) {
+                int previous_pos = previous >= 0 ? candidates[previous].pos : -1;
+                if ( previous_pos >= cur.pos )
+                    continue;
+                int line_start = previous_pos + 1;
+                int line_end = cur.pos;
+                int width_before = line_start > 0 ? m_widths[line_start-1] : 0;
+                int natural_width = m_widths[line_end] - width_before;
+                int capacity_end = line_end + 1;
+                if ( !cur.hyphenated && (m_flags[line_end] & LCHAR_IS_SPACE) ) {
+                    natural_width -= m_widths[line_end] -
+                                     (line_end > 0 ? m_widths[line_end-1] : 0);
+                    capacity_end = line_end;
+                }
+                if ( cur.hyphenated ) {
+                    LVFont * font = (LVFont *)m_srcs[line_end]->t.font;
+                    if ( font )
+                        natural_width += font->getHyphenWidth();
+                }
+                // Account for the exact left/right punctuation (or hyphen)
+                // overhang that addLine() will apply while rendering.
+                natural_width -= getOptimalHangingWidth(
+                        line_start, capacity_end - 1, cur.hyphenated);
+
+                bool first_line = previous < 0;
+                int target_width = regular_width -
+                        (first_line ? first_indent : following_indent);
+                if ( target_width <= 0 )
+                    continue;
+                int diff = target_width - natural_width;
+                bool final_line = line_end == m_length-1;
+                bool last_line_justified = final_line &&
+                        last_align == LTEXT_ALIGN_WIDTH &&
+                        (!if_not_first || previous >= 0);
+                bool ragged_final = final_line && !last_line_justified;
+                if ( ragged_final && diff < 0 )
+                    continue; // A left-aligned final line is never condensed.
+                int space_count = space_count_prefix[capacity_end] -
+                                  space_count_prefix[line_start];
+                int natural_space_total = 0;
+                int minimum_space_adjustment = 0;
+                int maximum_space_adjustment = 0;
+                if ( space_count > 0 ) {
+                    natural_space_total = space_width_prefix[capacity_end] -
+                                          space_width_prefix[line_start];
+                    int minimum_common_space = rangeMaximum(
+                            minimum_space_max_tree, line_start, capacity_end);
+                    int maximum_common_space = rangeMinimum(
+                            maximum_space_min_tree, line_start, capacity_end);
+                    if ( minimum_common_space > maximum_common_space ) {
+                        // Integer rasterisation can make nominally identical
+                        // spaces differ by a pixel (and mixed fonts can differ
+                        // more). Uniform visible gaps are the hard invariant:
+                        // collapse a disjoint configured interval to the
+                        // nearest common natural width and use tracking for
+                        // the remaining line-width correction.
+                        int normalized_space = (natural_space_total +
+                                space_count / 2) / space_count;
+                        minimum_common_space = std::max(1, normalized_space);
+                        maximum_common_space = minimum_common_space;
+                    }
+                    minimum_space_adjustment =
+                            minimum_common_space * space_count -
+                            natural_space_total;
+                    maximum_space_adjustment =
+                            maximum_common_space * space_count -
+                            natural_space_total;
+                }
+                int tracking_shrink_percent =
+                        m_pbuffer->justify_tracking_shrink_percent;
+                int tracking_shrink = m_kerning_mode == KERNING_MODE_HARFBUZZ
+                        ? natural_width * tracking_shrink_percent / 100 : 0;
+                int tracking_stretch = m_kerning_mode == KERNING_MODE_HARFBUZZ
+                        ? natural_width * m_pbuffer->justify_tracking_stretch_percent / 100 : 0;
+                int minimum_adjustment = minimum_space_adjustment -
+                                         tracking_shrink;
+                int maximum_adjustment = maximum_space_adjustment +
+                                         tracking_stretch;
+                int total_shrink = std::max(0, -minimum_adjustment);
+                int total_stretch = std::max(0, maximum_adjustment);
+                int capacity = diff < 0 ? total_shrink : total_stretch;
+                int emergency_excess = 0;
+                if ( diff < minimum_adjustment ) {
+                    if ( previous >= 0 ) {
+                        // A usual positive first-line indent only narrows that
+                        // line further, so it cannot restore feasibility. A
+                        // negative hanging indent is wider: skip directly to
+                        // its distinct first-line case before stopping.
+                        if ( first_indent >= following_indent )
+                            break;
+                        previous = 0;
+                    }
+                    continue;
+                }
+                if ( diff > maximum_adjustment && !ragged_final &&
+                        total_stretch == 0 &&
+                        !allow_emergency_stretch )
+                    continue;
+                if ( diff > maximum_adjustment && !ragged_final &&
+                        !allow_emergency_stretch )
+                    continue;
+
+                int badness;
+                if ( ragged_final && diff >= 0 ) {
+                    badness = 0;
+                }
+                else if ( diff > maximum_adjustment ) {
+                    // The final Knuth-only recovery pass must not fall back
+                    // to Greedy merely because the configured quality limits
+                    // leave no complete paragraph path. Let word spaces take
+                    // any remaining positive width, while still preserving
+                    // the hard negative-tracking/overfull-line constraints.
+                    int emergency = force_quality_fallback
+                            ? target_width
+                            : target_width *
+                                m_pbuffer->justify_emergency_stretch_percent / 100;
+                    emergency_excess = diff - maximum_adjustment;
+                    if ( emergency_excess > emergency )
+                        continue;
+                    capacity = std::max(capacity,
+                            maximum_adjustment + emergency);
+                    badness = optimalLineBadness(diff, capacity);
+                }
+                else {
+                    badness = optimalLineBadness(diff, capacity);
+                }
+                int fitness = ragged_final && diff >= 0
+                        ? 1 : optimalLineFitness(diff, capacity);
+                if ( !force_quality_fallback && !ragged_final &&
+                        badness > tolerance )
+                    continue;
+                // Model the renderer's exact ordering: first choose one
+                // absolute word-space width, then put the integer remainder
+                // into line-wide microtracking.
+                int tracking_basis_points = 0;
+                int word_space_basis_points = NO_WORD_SPACE_GUIDE;
+                int final_common_space_width = 0;
+                int final_tracking_adjustment = 0;
+                if ( !ragged_final && natural_width > 0 ) {
+                    int space_adjustment = 0;
+                    if ( space_count > 0 ) {
+                        int desired_space_total = natural_space_total + diff;
+                        int target_space = (desired_space_total +
+                                space_count / 2) / space_count;
+                        target_space = std::max(1, target_space);
+                        int minimum_common_space =
+                                (natural_space_total +
+                                 minimum_space_adjustment) / space_count;
+                        int maximum_common_space =
+                                (natural_space_total +
+                                 maximum_space_adjustment) / space_count;
+                        target_space = std::max(minimum_common_space,
+                                std::min(maximum_common_space, target_space));
+                        space_adjustment =
+                                target_space * space_count -
+                                natural_space_total;
+                    }
+                    int tracking_adjustment = diff - space_adjustment;
+                    if ( tracking_adjustment > tracking_stretch &&
+                            (force_quality_fallback ||
+                             emergency_excess > 0 ||
+                             m_pbuffer->justify_tracking_stretch_percent == 0) ) {
+                        if ( space_count == 0 )
+                            continue;
+                        // Mirror applyOptimizedJustification(): put the part
+                        // beyond configured positive tracking capacity into
+                        // equal word spaces, including on the forced pass.
+                        int raise_by = (tracking_adjustment - tracking_stretch +
+                                space_count - 1) / space_count;
+                        space_adjustment += raise_by * space_count;
+                        tracking_adjustment = diff - space_adjustment;
+                    }
+                    if ( tracking_adjustment > tracking_stretch ||
+                            -tracking_adjustment > tracking_shrink )
+                        continue;
+                    if ( space_count > 0 )
+                        final_common_space_width =
+                                (natural_space_total + space_adjustment) /
+                                space_count;
+                    if ( space_count > 0 && natural_space_total > 0 ) {
+                        long long scaled =
+                                (long long)space_adjustment * 10000;
+                        if ( scaled >= 0 )
+                            word_space_basis_points =
+                                    (int)((scaled + natural_space_total / 2) /
+                                          natural_space_total);
+                        else
+                            word_space_basis_points =
+                                    (int)((scaled - natural_space_total / 2) /
+                                          natural_space_total);
+                    }
+                    final_tracking_adjustment = tracking_adjustment;
+                    long long scaled = (long long)tracking_adjustment * 10000;
+                    if ( scaled >= 0 )
+                        tracking_basis_points =
+                                (int)((scaled + natural_width / 2) /
+                                      natural_width);
+                    else
+                        tracking_basis_points =
+                                (int)((scaled - natural_width / 2) /
+                                      natural_width);
+                }
+                OptimalLineTexture line_texture;
+                if ( !ragged_final ) {
+                    int glyph_advance = std::max(0,
+                            natural_width - natural_space_total);
+                    line_texture.ink_density_basis_points =
+                            (int)((long long)glyph_advance * 10000 /
+                                  target_width);
+                    line_texture.common_space_width =
+                            final_common_space_width;
+                }
+                // Keep TeX feasibility and badness as the sane-path guardrail.
+                // Texture transitions join this cost below, but cannot replace
+                // the positive per-line cost and game the search with many
+                // very short, uniformly empty lines.
+                long long line_cost = (long long)
+                        (m_pbuffer->justify_line_penalty + badness) *
+                        (m_pbuffer->justify_line_penalty + badness);
+                if ( first_line && first_indent != following_indent &&
+                        diff != 0 )
+                    line_cost *= 4;
+                if ( emergency_excess > 0 ) {
+                    long long concentration = (long long)20 *
+                            emergency_excess / std::max(1, total_stretch);
+                    line_cost += concentration * concentration;
+                }
+                if ( ragged_final ) {
+                    int preferred = target_width *
+                            m_pbuffer->justify_last_line_min_percent / 100;
+                    if ( natural_width < preferred ) {
+                        int deficit = preferred - natural_width;
+                        line_cost += SHORT_FINAL_LINE_DEMERITS + 5000 +
+                                (long long)5000 * deficit /
+                                    std::max(1, preferred);
+                    }
+                }
+                std::vector<int> line_gap_centers;
+                bool line_gap_centers_ready = false;
+                int prior_first = 0;
+                int prior_last = previous < 0 ? 1 : 4;
+                for ( int prior_fitness=prior_first;
+                        prior_fitness<prior_last; prior_fitness++ ) {
+                    long long prior_cost = previous < 0
+                            ? 0 : cost[previous*4 + prior_fitness];
+                    if ( prior_cost == INF )
+                        continue;
+                    // The first line has a structurally different measure
+                    // when indented, so do not force its tracking to match the
+                    // full-width second line. Smoothness still applies from
+                    // the second line onward.
+                    bool previous_is_first_line = previous >= 0 &&
+                            previous_candidate[
+                                previous*4 + prior_fitness] < 0;
+                    if ( !force_quality_fallback && emergency_excess == 0 &&
+                            previous >= 0 &&
+                            !previous_is_first_line &&
+                            !ragged_final &&
+                            m_pbuffer->justify_tracking_delta_max_bp > 0 &&
+                            std::abs(tracking_basis_points -
+                                last_tracking_basis_points[
+                                    previous*4 + prior_fitness]) >
+                                m_pbuffer->justify_tracking_delta_max_bp )
+                        continue;
+                    long long total = prior_cost + line_cost;
+                    if ( previous >= 0 ) {
+                        size_t prior_state = previous*4 + prior_fitness;
+                        int previous_word_space_basis_points =
+                                last_word_space_basis_points[prior_state];
+                        if ( !ragged_final &&
+                                word_space_basis_points != NO_WORD_SPACE_GUIDE &&
+                                previous_word_space_basis_points !=
+                                    NO_WORD_SPACE_GUIDE ) {
+                            long long delta = std::abs(
+                                    word_space_basis_points -
+                                    previous_word_space_basis_points);
+                            delta = std::min((long long)5000, delta);
+                            total += (long long)
+                                    m_pbuffer->justify_adjacent_demerits *
+                                    delta * delta / 10000000;
+                        }
+                        if ( std::abs(fitness - prior_fitness) > 1 )
+                            total += m_pbuffer->justify_adjacent_demerits;
+                        size_t state = current*4 + fitness;
+                        // Texture penalties are non-negative. If the TeX and
+                        // previously accumulated texture cost has already
+                        // lost this state, river geometry cannot rescue it;
+                        // avoid constructing gap coordinates for that edge.
+                        if ( total >= cost[state] )
+                            continue;
+                        if ( !ragged_final &&
+                                line_texture.ink_density_basis_points > 0 &&
+                                last_ink_density_basis_points[prior_state] > 0 ) {
+                            if ( !line_gap_centers_ready ) {
+                                getOptimalGapCenters(line_start, capacity_end,
+                                        width_before,
+                                        first_line ? first_indent : following_indent,
+                                        final_common_space_width,
+                                        final_tracking_adjustment, natural_width,
+                                        line_gap_centers);
+                                line_gap_centers_ready = true;
+                            }
+                            int colour_penalty = optimalTextureRatioDelta(
+                                    line_texture.ink_density_basis_points,
+                                    last_ink_density_basis_points[prior_state]);
+                            int river_penalty = optimalRiverAlignment(
+                                    line_gap_centers,
+                                    last_gap_centers[prior_state],
+                                    river_gaussian_kernel);
+                            int rhythm_penalty = optimalTextureRatioDelta(
+                                    line_texture.common_space_width,
+                                    last_common_space_width[prior_state]);
+                            // Hyphens intentionally add nothing here. Their
+                            // effect is assessed only through the resulting
+                            // line geometry, exactly like a normal word break.
+                            long long texture_transition =
+                                    (long long)30 * colour_penalty +
+                                    (long long)30 * river_penalty +
+                                    (long long)10 * rhythm_penalty;
+                            total += texture_transition /
+                                    TEXTURE_SEARCH_DIVISOR;
+                        }
+                    }
+                    size_t state = current*4 + fitness;
+                    if ( total < cost[state] ) {
+                        cost[state] = total;
+                        previous_candidate[state] = previous;
+                        previous_fitness[state] = previous < 0 ? -1 : prior_fitness;
+                        last_tracking_basis_points[state] =
+                                tracking_basis_points;
+                        last_word_space_basis_points[state] =
+                                word_space_basis_points;
+                        last_ink_density_basis_points[state] =
+                                line_texture.ink_density_basis_points;
+                        last_common_space_width[state] =
+                                line_texture.common_space_width;
+                        if ( !ragged_final ) {
+                            if ( !line_gap_centers_ready ) {
+                                getOptimalGapCenters(line_start, capacity_end,
+                                        width_before,
+                                        first_line ? first_indent : following_indent,
+                                        final_common_space_width,
+                                        final_tracking_adjustment, natural_width,
+                                        line_gap_centers);
+                                line_gap_centers_ready = true;
+                            }
+                            last_gap_centers[state] = line_gap_centers;
+                        }
+                        else
+                            last_gap_centers[state].clear();
+                    }
+                }
+            }
+        }
+
+        int final_candidate = (int)candidates.size() - 1;
+        int final_fitness = -1;
+        long long final_cost = INF;
+        for ( int fitness=0; fitness<4; fitness++ ) {
+            size_t state = final_candidate*4 + fitness;
+            long long value = cost[state];
+            if ( value < final_cost ) {
+                final_cost = value;
+                final_fitness = fitness;
+            }
+        }
+        if ( final_fitness < 0 )
+            return false;
+        if ( result_cost )
+            *result_cost = final_cost;
+
+        result.clear();
+        int current = final_candidate;
+        int fitness = final_fitness;
+        while ( current >= 0 ) {
+            result.push_back(OptimalLineBreak(candidates[current].pos,
+                                              candidates[current].hyphenated));
+            size_t state = current*4 + fitness;
+            int next_current = previous_candidate[state];
+            int next_fitness = previous_fitness[state];
+            current = next_current;
+            fitness = next_fitness;
+        }
+        std::reverse(result.begin(), result.end());
+        return !result.empty() && result.back().pos == m_length-1;
+    }
+
+    bool tryOptimizedParagraph(src_text_fragment_t * para,
+                               bool preFormattedOnly, bool isLastPara) {
+        if ( m_pbuffer->line_breaking_mode != 1 ||
+                !canOptimizeParagraph(para, preFormattedOnly) )
+            return false;
+        std::vector<OptimalLineBreak> breaks;
+        std::vector<OptimalLineBreak> unhyphenated_breaks;
+        std::vector<OptimalLineBreak> hyphenated_breaks;
+        long long unhyphenated_cost = 0;
+        long long hyphenated_cost = 0;
+        bool have_unhyphenated = buildOptimalBreaks(para,
+                unhyphenated_breaks, false,
+                m_pbuffer->justify_pretolerance, false, false, NULL,
+                &unhyphenated_cost);
+
+        // A merely acceptable unhyphenated solution must not prevent a calmer
+        // discretionary-hyphen sequence from being considered. Build both
+        // normal graphs and compare their complete texture-aware search cost.
+        // TeX feasibility and badness remain the guardrail; every viable edge
+        // is additionally guided by 30/30/30/10 texture transitions. Hyphens
+        // deliberately carry zero direct weight.
+        std::vector<bool> hyphenation;
+        findParagraphHyphenation(hyphenation);
+        bool have_hyphenated = buildOptimalBreaks(para,
+                hyphenated_breaks, true,
+                m_pbuffer->justify_tolerance, false, false, &hyphenation,
+                &hyphenated_cost);
+        if ( have_unhyphenated || have_hyphenated ) {
+            if ( have_hyphenated && (!have_unhyphenated ||
+                    hyphenated_cost < unhyphenated_cost) ) {
+                breaks.swap(hyphenated_breaks);
+            }
+            else {
+                breaks.swap(unhyphenated_breaks);
+            }
+        }
+        else if ( !buildOptimalBreaks(para, breaks, true,
+                    m_pbuffer->justify_tolerance, true, false,
+                    &hyphenation) &&
+                // Supported paragraphs stay on the paragraph-wide formatter
+                // even when user limits are too strict to produce a normal
+                // path. Greedy remains only for structurally unsupported or
+                // physically impossible content.
+                !buildOptimalBreaks(para, breaks, true, 10000, true, true,
+                    &hyphenation) ) {
+            return false;
+        }
+
+        int pos = 0;
+        m_using_optimal_breaks = true;
+        m_using_optimized_spacing = true;
+        for ( size_t i=0; i<breaks.size(); i++ ) {
+            int x = m_indent_current;
+            if ( !m_indent_first_line_done ) {
+                m_indent_first_line_done = true;
+                m_indent_current = m_indent_after_first_line;
+            }
+            int wrap_pos = breaks[i].pos;
+            lUInt16 saved_flags = m_flags[wrap_pos];
+            if ( breaks[i].hyphenated )
+                m_flags[wrap_pos] |= LCHAR_ALLOW_HYPH_WRAP_AFTER;
+            addLine(pos, wrap_pos + 1, x, para, pos == 0,
+                    wrap_pos >= m_length-1, preFormattedOnly, isLastPara,
+                    m_has_inline_boxes);
+            m_flags[wrap_pos] = saved_flags;
+            pos = wrap_pos + 1;
+        }
+        m_using_optimal_breaks = false;
+        m_using_optimized_spacing = false;
+        return pos >= m_length;
+    }
+
     /// Split paragraph into lines
     void processParagraph( int start, int end, bool isLastPara )
     {
         TR("processParagraph(%d, %d)", start, end);
+        m_mark_greedy_fallback = false;
 
         // ensure buffer size is ok for paragraph
         allocate( start, end );
@@ -4989,6 +6263,26 @@ public:
             }
             preFormattedOnly = preFormattedOnly && lfFound;
         }
+
+        if ( tryOptimizedParagraph(para, preFormattedOnly, isLastPara) )
+            return;
+
+        // Mark only paragraphs that were intended for optimized justified
+        // breaking but had to use the legacy greedy formatter (unsupported
+        // structure or a physically impossible optimized path). The first
+        // greedy line carries the bit so Draw() can show one unobtrusive dot.
+        m_mark_greedy_fallback = m_pbuffer->line_breaking_mode == 1 &&
+                (para->flags & LTEXT_FLAG_NEWLINE) == LTEXT_ALIGN_WIDTH &&
+                !(para->flags & LTEXT_LEGACY_RENDERING);
+
+        // Hybrid mode deliberately keeps the legacy Greedy line-break
+        // sequence, but gives suitable justified Latin paragraphs the same
+        // equal word spaces and bounded distributed microtracking used by the
+        // optimized renderer. Unsupported structures retain stock Greedy
+        // spacing, avoiding the old optimized-fallback collision bug.
+        m_using_optimized_spacing =
+                m_pbuffer->line_breaking_mode == 2 &&
+                canOptimizeParagraph(para, preFormattedOnly);
 
         // Not per-specs, but when floats reduce the available width, skip y until
         // we have the width to draw at least a few chars on a line.
@@ -5682,6 +6976,7 @@ public:
             #endif
         }
 
+        m_using_optimized_spacing = false;
     }
 
     void processEmbeddedBlock( int idx )
@@ -6081,6 +7376,39 @@ void LFormattedText::setMaxAddedLetterSpacingPercent(int maxAddedLetterSpacingPe
 {
     if (maxAddedLetterSpacingPercent>=0 && maxAddedLetterSpacingPercent<=20)
         m_pbuffer->max_added_letter_spacing_percent = maxAddedLetterSpacingPercent;
+}
+
+void LFormattedText::setLineBreakingMode(int lineBreakingMode)
+{
+    if (lineBreakingMode>=0 && lineBreakingMode<=2)
+        m_pbuffer->line_breaking_mode = lineBreakingMode;
+}
+
+void LFormattedText::setJustificationConfig(
+        int spaceShrinkPercent, int spaceStretchPercent,
+        int trackingShrinkPercent, int trackingStretchPercent,
+        int pretolerance, int tolerance,
+        int hyphenPenalty, int explicitHyphenPenalty,
+        int linePenalty, int adjacentDemerits,
+        int doubleHyphenDemerits, int finalHyphenDemerits,
+        int emergencyStretchPercent, int lastLineMinPercent,
+        int trackingDeltaMaxBp)
+{
+    m_pbuffer->justify_space_shrink_percent = spaceShrinkPercent;
+    m_pbuffer->justify_space_stretch_percent = spaceStretchPercent;
+    m_pbuffer->justify_tracking_shrink_percent = trackingShrinkPercent;
+    m_pbuffer->justify_tracking_stretch_percent = trackingStretchPercent;
+    m_pbuffer->justify_pretolerance = pretolerance;
+    m_pbuffer->justify_tolerance = tolerance;
+    m_pbuffer->justify_hyphen_penalty = hyphenPenalty;
+    m_pbuffer->justify_explicit_hyphen_penalty = explicitHyphenPenalty;
+    m_pbuffer->justify_line_penalty = linePenalty;
+    m_pbuffer->justify_adjacent_demerits = adjacentDemerits;
+    m_pbuffer->justify_double_hyphen_demerits = doubleHyphenDemerits;
+    m_pbuffer->justify_final_hyphen_demerits = finalHyphenDemerits;
+    m_pbuffer->justify_emergency_stretch_percent = emergencyStretchPercent;
+    m_pbuffer->justify_last_line_min_percent = lastLineMinPercent;
+    m_pbuffer->justify_tracking_delta_max_bp = trackingDeltaMaxBp;
 }
 
 void LFormattedText::setCJKWidthScalePercent(int cjkWidthScalePercent)
@@ -6544,8 +7872,32 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
             }
 #endif
 
+            if ( frmline->flags & LTEXT_LINE_GREEDY_FALLBACK ) {
+                // A tiny square just before the first-line text indent marks
+                // an optimized paragraph that actually used greedy fallback.
+                // With no indent it sits in the left margin and may be clipped,
+                // which is preferable to covering the first glyph.
+                const int marker_size = 3;
+                int marker_x = x + frmline->x - marker_size - 2;
+                if ( frmline->flags & LTEXT_LINE_PARA_IS_RTL )
+                    marker_x = x + frmline->x + frmline->width + 2;
+                int marker_y = line_y + frmline->baseline - marker_size;
+                buf->FillRect(marker_x, marker_y,
+                        marker_x + marker_size, marker_y + marker_size,
+                        buf->GetTextColor());
+            }
+
             int text_decoration_back_gap;
             lUInt16 lastWordSrcIndex;
+            int distributed_tracking_points = 0;
+            for ( j=0; j<frmline->word_count; j++ ) {
+                if ( frmline->words[j].flags &
+                        LTEXT_WORD_HAS_DISTRIBUTED_TRACKING ) {
+                    int points = frmline->words[j].distinct_glyphs;
+                    if ( points > 1 )
+                        distributed_tracking_points += points - 1;
+                }
+            }
             for (j=0; j<frmline->word_count; j++)
             {
                 word = &frmline->words[j];
@@ -6675,7 +8027,7 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
                     // and chars direction, and if word begins or ends paragraph (for Harfbuzz)
                     drawFlags |= WORD_FLAGS_TO_FNT_FLAGS(word->flags);
                     // For debugging, to visually see overlap/italic correction:
-                    // if (word->flags & LTEXT_WORD__AVAILABLE_BIT_16__ ) drawFlags |= LTEXT_TD_OVERLINE;
+                    // A dedicated debug flag could add LTEXT_TD_OVERLINE here.
                     int x0, y0, w, h;
                     if ( srcline->flags & LTEXT_MATH_TRANSFORM ) {
                         ldomNode * node = (ldomNode *) srcline->object;
@@ -6725,6 +8077,14 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
                             }
                             */
                         }
+                    }
+                    if ( (word->flags & LTEXT_WORD_HAS_DISTRIBUTED_TRACKING) &&
+                            word->distinct_glyphs > 1 &&
+                            distributed_tracking_points > 0 ) {
+                        drawFlags |= LFNT_HINT_DISTRIBUTED_TRACKING;
+                        w = word->_top_to_baseline;
+                        h = ((lUInt32)word->_baseline_to_bottom << 16) |
+                                (lUInt16)distributed_tracking_points;
                     }
                     font->DrawTextString(
                         buf,
