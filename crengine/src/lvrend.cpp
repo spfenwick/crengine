@@ -10089,9 +10089,24 @@ void DrawBorder(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int doc_x,int 
                     return;
                 }
 
-                // Helpers for shading
-                auto make_shade = [](lUInt32 c){ lUInt32 o=c&0xFF000000; lUInt32 r=(c>>16)&0xFF,g=(c>>8)&0xFF,b=c&0xFF; r=r*160/255; g=g*160/255; b=b*160/255; return o|(r<<16)|(g<<8)|b; };
-                auto make_light = [](lUInt32 c){ return c; };
+                // Helpers for shading. Mirrors the legacy straight-corner logic just
+                // below (e.g. around line 10395): Firefox uses fixed near-black
+                // shade/light values when the border color is real black (0x000000),
+                // rather than the generic darkening formula, which would otherwise
+                // collapse shade == light == black.
+                auto make_shade = [](lUInt32 c){
+                    lUInt32 o=c&0xFF000000;
+                    if ((c & 0xFFFFFF) == 0) {
+                        return o | 0x4c4c4cu;
+                    }
+                    lUInt32 r=(c>>16)&0xFF,g=(c>>8)&0xFF,b=c&0xFF; r=r*160/255; g=g*160/255; b=b*160/255; return o|(r<<16)|(g<<8)|b;
+                };
+                auto make_light = [](lUInt32 c){
+                    if ((c & 0xFFFFFF) == 0) {
+                        return (c & 0xFF000000) | 0xb2b2b2u;
+                    }
+                    return c;
+                };
 
                 // Helpers to draw only LR or only TB for a band [w0..w1)
                 auto draw_band_lr = [&](int w0_top,int w0_right,int w0_bottom,int w0_left,
