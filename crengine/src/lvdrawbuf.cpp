@@ -19,6 +19,7 @@
 #include <string.h>
 #include <math.h>
 #include "../include/lvdrawbuf.h"
+#include "../include/lvrend.h" // for draw_extra_info_t
 
 #define GUARD_BYTE 0xa5
 #define CHECK_GUARD_BYTE \
@@ -611,19 +612,11 @@ public:
         int rrx[4] = {0,0,0,0};
         int rry[4] = {0,0,0,0};
         bool use_rounded_clip = false;
-        void *dei = dst->GetDrawExtraInfo();
+        draw_extra_info_t *dei = (draw_extra_info_t*)dst->GetDrawExtraInfo();
         if (dei) {
-            // draw_extra_info_t is declared in lvrend.h; avoid including it here to keep coupling low.
-            // We know its layout: first fields then a bool rounded_clip_active followed by rect and radii.
-            struct RoundedClipShim {
-                // Keep the same prefix layout as draw_extra_info_t up to content_overflow_clip
-                bool is_page_mode; bool is_left_page; bool is_right_page; bool draw_body_background;
-                lvRect body_background_clip; lvRect content_overflow_clip;
-                bool rounded_clip_active; lvRect rounded_clip_rect; int rounded_rx[4]; int rounded_ry[4];
-            } *info = (RoundedClipShim*)dei;
-            if (info->rounded_clip_active) {
-                rounded_clip = info->rounded_clip_rect;
-                for (int i=0;i<4;i++){ rrx[i]=info->rounded_rx[i]; rry[i]=info->rounded_ry[i]; }
+            if (dei->rounded_clip_active) {
+                rounded_clip = dei->rounded_clip_rect;
+                for (int i=0;i<4;i++){ rrx[i]=dei->rounded_rx[i]; rry[i]=dei->rounded_ry[i]; }
                 use_rounded_clip = true;
             }
         }
