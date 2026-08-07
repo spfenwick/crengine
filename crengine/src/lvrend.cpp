@@ -10017,8 +10017,10 @@ void DrawBorder(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int doc_x,int 
                 // Handle each style by decomposing into bands (where needed)
                 lUInt32 sideColors[4] = { topBordercolor, rightBordercolor, bottomBordercolor, leftBordercolor };
 
-                // Dispatch per-side by style. If any side is dashed/dotted, we fallback to legacy for now.
-                // Treat dashed/dotted as solid for rounded rendering for now
+                // Dispatch per-side by style. Dashed/dotted sides get their own dedicated
+                // rounded-corner rendering below (fillRoundedRectDashedRing for the
+                // uniform-ring fast path, draw_band_lr_dashed/draw_band_tb_dashed for the
+                // general per-side case) rather than falling back to solid or to legacy.
                 bool side_is_solid[4] = {
                     hastopBorder && (style->border_style_top==css_border_solid),
                     hasrightBorder && (style->border_style_right==css_border_solid),
