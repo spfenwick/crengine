@@ -842,10 +842,23 @@ static void crFillOutlineAndBlit(LVDrawBuf &drawbuf, std::vector<FT_Vector> &pts
 // miter cut from the outer boundary point to the inner boundary point at
 // that same split angle.
 // Passing w0=0, w1=side's full width covers the plain solid-style case.
+//
+// sideHasBorder[4] says which of the four sides actually paint anything
+// (false for border-style:none, which the caller never dispatches into a
+// wedge/stroke call of its own). Where this side's neighbor at a shared
+// corner has nothing to paint, that neighbor's half of the corner would
+// otherwise go completely undrawn -- a visible gap browsers don't have,
+// since they let this side's border sweep the whole corner instead of
+// stopping at the diagonal split. So when the corner-cA neighbor (the
+// previous side) has no border, tmA widens from the diagonal split out to
+// tA0 (the corner's own far tangent point), and symmetrically tmB widens to
+// tB1 when the corner-cB neighbor (the next side) has none -- either way
+// giving this side the entire corner instead of half of it.
 static void fillSideWedge(LVDrawBuf &drawbuf, int x0, int y0, int x1, int y1,
                            const int rx[4], const int ry[4],
                            int tbw, int rbw, int bbw, int lbw,
-                           int side, double w0, double w1, lUInt32 color) {
+                           int side, double w0, double w1, lUInt32 color,
+                           const bool sideHasBorder[4]) {
     if (w1 <= w0)
         return;
     const double sideFullW[4] = { (double)tbw, (double)rbw, (double)bbw, (double)lbw };
@@ -861,9 +874,11 @@ static void fillSideWedge(LVDrawBuf &drawbuf, int x0, int y0, int x1, int y1,
     double cxB0, cyB0, rxB0, ryB0; cornerArcAt(cB, x0, y0, x1, y1, rx, ry, whB0, wvB0, cxB0, cyB0, rxB0, ryB0);
     double cxB1, cyB1, rxB1, ryB1; cornerArcAt(cB, x0, y0, x1, y1, rx, ry, whB1, wvB1, cxB1, cyB1, rxB1, ryB1);
 
-    double tA0 = CR_CORNER_T0[cA], tA1 = CR_CORNER_T1[cA], tmA = cornerDiagonalT(cA, rx[cA], ry[cA]);
-    double tB0 = CR_CORNER_T0[cB], tB1 = CR_CORNER_T1[cB], tmB = cornerDiagonalT(cB, rx[cB], ry[cB]);
-    (void)tA0; (void)tB1;
+    const int prevSide = (side + 3) % 4, nextSide = (side + 1) % 4;
+    double tA0 = CR_CORNER_T0[cA], tA1 = CR_CORNER_T1[cA];
+    double tmA = sideHasBorder[prevSide] ? cornerDiagonalT(cA, rx[cA], ry[cA]) : tA0;
+    double tB0 = CR_CORNER_T0[cB], tB1 = CR_CORNER_T1[cB];
+    double tmB = sideHasBorder[nextSide] ? cornerDiagonalT(cB, rx[cB], ry[cB]) : tB1;
 
     const int pad = 2; // AA slop only -- a wedge never extends past the outer box edge
     const int originX = x0 - pad, originY = y0 - pad;
@@ -904,10 +919,15 @@ static void fillSideWedge(LVDrawBuf &drawbuf, int x0, int y0, int x1, int y1,
 // corner-arc half) instead of the whole ring. Reuses the exact same
 // run-detection/crEmitDashRun/crEmitDot machinery fillRoundedRectDashedRing
 // uses for the uniform-ring fast path, just over a 3-segment sub-path.
+//
+// sideHasBorder[4]: see the comment on fillSideWedge above -- same widening
+// to the corner's far tangent point when a neighboring side has no border
+// of its own to claim its half of the shared corner.
 static void strokeSideDashedOrDotted(LVDrawBuf &drawbuf, int x0, int y0, int x1, int y1,
                                       const int rx[4], const int ry[4],
                                       int tbw, int rbw, int bbw, int lbw,
-                                      int side, int w_side, bool dotted, lUInt32 color) {
+                                      int side, int w_side, bool dotted, lUInt32 color,
+                                      const bool sideHasBorder[4]) {
     if (w_side <= 0)
         return;
     const double half = w_side / 2.0;
@@ -916,9 +936,11 @@ static void strokeSideDashedOrDotted(LVDrawBuf &drawbuf, int x0, int y0, int x1,
     double whB, wvB; int cB = sideCornerHV(side, false, half, (double)w_side, tbw, rbw, bbw, lbw, whB, wvB);
     double cxA, cyA, rxA, ryA; cornerArcAt(cA, x0, y0, x1, y1, rx, ry, whA, wvA, cxA, cyA, rxA, ryA);
     double cxB, cyB, rxB, ryB; cornerArcAt(cB, x0, y0, x1, y1, rx, ry, whB, wvB, cxB, cyB, rxB, ryB);
-    double tA0 = CR_CORNER_T0[cA], tA1 = CR_CORNER_T1[cA], tmA = cornerDiagonalT(cA, rx[cA], ry[cA]);
-    double tB0 = CR_CORNER_T0[cB], tB1 = CR_CORNER_T1[cB], tmB = cornerDiagonalT(cB, rx[cB], ry[cB]);
-    (void)tA0; (void)tB1;
+    const int prevSide = (side + 3) % 4, nextSide = (side + 1) % 4;
+    double tA0 = CR_CORNER_T0[cA], tA1 = CR_CORNER_T1[cA];
+    double tmA = sideHasBorder[prevSide] ? cornerDiagonalT(cA, rx[cA], ry[cA]) : tA0;
+    double tB0 = CR_CORNER_T0[cB], tB1 = CR_CORNER_T1[cB];
+    double tmB = sideHasBorder[nextSide] ? cornerDiagonalT(cB, rx[cB], ry[cB]) : tB1;
 
     double edgeAx, edgeAy; evalEllipsePt(cxA, cyA, rxA, ryA, tA1, edgeAx, edgeAy);
     double edgeBx, edgeBy; evalEllipsePt(cxB, cyB, rxB, ryB, tB0, edgeBx, edgeBy);
@@ -10523,23 +10545,43 @@ void DrawBorder(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int doc_x,int 
                 // wedge is bounded by the exact same miter line its neighbor's
                 // wedge starts from, so sides can be done in any order.
                 int sideWidth[4] = { tbw, rbw, bbw, lbw };
+                // Which sides actually paint anything -- a border-style:none
+                // side never reaches any of the branches below, so its half
+                // of a shared corner needs to be ceded to the neighbor that
+                // does paint there (see the sideHasBorder comment on
+                // fillSideWedge above).
+                const bool sideHasBorder[4] = { hastopBorder, hasrightBorder, hasbottomBorder, hasleftBorder };
+                // Effective widths for corner-shrink purposes: a side can
+                // have a nonzero tbw/rbw/bbw/lbw (e.g. DEFAULT_BORDER_WIDTH)
+                // even when border-style:none means it paints nothing, and
+                // sideCornerHV's cross-axis inset uses whichever of these
+                // belongs to the *neighboring* side sharing a corner. Without
+                // zeroing it here, widening tmA/tmB above only moves where
+                // the sweep ends -- the neighbor's phantom width still
+                // shrinks the inner boundary there, so the wedge still gets
+                // cut off at nonzero width instead of tapering to the true
+                // zero-width point a smooth corner needs.
+                const int etbw = hastopBorder ? tbw : 0;
+                const int erbw = hasrightBorder ? rbw : 0;
+                const int ebbw = hasbottomBorder ? bbw : 0;
+                const int elbw = hasleftBorder ? lbw : 0;
                 for (int side = 0; side < 4; side++) {
                     int w = sideWidth[side];
                     lUInt32 c = sideColors[side];
                     if (side_is_dashed[side] || side_is_dotted[side]) {
-                        strokeSideDashedOrDotted(drawbuf, X0, Y0, X1, Y1, rx, ry, tbw, rbw, bbw, lbw,
-                                                  side, w, side_is_dotted[side], c);
+                        strokeSideDashedOrDotted(drawbuf, X0, Y0, X1, Y1, rx, ry, etbw, erbw, ebbw, elbw,
+                                                  side, w, side_is_dotted[side], c, sideHasBorder);
                     } else if (side_is_solid[side]) {
-                        fillSideWedge(drawbuf, X0, Y0, X1, Y1, rx, ry, tbw, rbw, bbw, lbw,
-                                      side, 0, w, c);
+                        fillSideWedge(drawbuf, X0, Y0, X1, Y1, rx, ry, etbw, erbw, ebbw, elbw,
+                                      side, 0, w, c, sideHasBorder);
                     } else if (side_is_double[side]) {
                         int gap = std::max(1, w/3);
                         int outer = (w - gap)/2;
                         int inner = w - gap - outer;
-                        fillSideWedge(drawbuf, X0, Y0, X1, Y1, rx, ry, tbw, rbw, bbw, lbw,
-                                      side, 0, outer, c);
-                        fillSideWedge(drawbuf, X0, Y0, X1, Y1, rx, ry, tbw, rbw, bbw, lbw,
-                                      side, w - inner, w, c);
+                        fillSideWedge(drawbuf, X0, Y0, X1, Y1, rx, ry, etbw, erbw, ebbw, elbw,
+                                      side, 0, outer, c, sideHasBorder);
+                        fillSideWedge(drawbuf, X0, Y0, X1, Y1, rx, ry, etbw, erbw, ebbw, elbw,
+                                      side, w - inner, w, c, sideHasBorder);
                     } else if (side_is_groove[side] || side_is_ridge[side]) {
                         bool groove = side_is_groove[side];
                         int half = std::max(1, w/2);
@@ -10550,17 +10592,17 @@ void DrawBorder(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int doc_x,int 
                         bool outerIsShade = groove ? (side == 0 || side == 3) : (side == 1 || side == 2);
                         lUInt32 cOuter = outerIsShade ? make_shade(c) : make_light(c);
                         lUInt32 cInner = outerIsShade ? make_light(c) : make_shade(c);
-                        fillSideWedge(drawbuf, X0, Y0, X1, Y1, rx, ry, tbw, rbw, bbw, lbw,
-                                      side, 0, half, cOuter);
-                        fillSideWedge(drawbuf, X0, Y0, X1, Y1, rx, ry, tbw, rbw, bbw, lbw,
-                                      side, half, w, cInner);
+                        fillSideWedge(drawbuf, X0, Y0, X1, Y1, rx, ry, etbw, erbw, ebbw, elbw,
+                                      side, 0, half, cOuter, sideHasBorder);
+                        fillSideWedge(drawbuf, X0, Y0, X1, Y1, rx, ry, etbw, erbw, ebbw, elbw,
+                                      side, half, w, cInner, sideHasBorder);
                     } else if (side_is_inset[side] || side_is_outset[side]) {
                         bool inset = side_is_inset[side];
                         // inset: shade on top+left, light on right+bottom; outset is the reverse.
                         bool isShade = inset ? (side == 0 || side == 3) : (side == 1 || side == 2);
                         lUInt32 cc = isShade ? make_shade(c) : make_light(c);
-                        fillSideWedge(drawbuf, X0, Y0, X1, Y1, rx, ry, tbw, rbw, bbw, lbw,
-                                      side, 0, w, cc);
+                        fillSideWedge(drawbuf, X0, Y0, X1, Y1, rx, ry, etbw, erbw, ebbw, elbw,
+                                      side, 0, w, cc, sideHasBorder);
                     }
                 }
 
