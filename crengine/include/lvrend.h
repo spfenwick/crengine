@@ -134,6 +134,17 @@ typedef struct {
     int rounded_ry[4];        // per-corner vertical radii (TL, TR, BR, BL)
 } draw_extra_info_t;
 
+// Compute the horizontal span [xl2, xr2) at scanline y for a rounded rectangle
+// (defined by corner radii rx[4]/ry[4], TL/TR/BR/BL) inset per-side by
+// w_top/w_right/w_bottom/w_left (pass all zero for the outer/unshrunk span).
+// Defined in lvrend.cpp; shared with lvdrawbuf.cpp's per-scanline rounded clip
+// mask so the elliptical-corner math has a single implementation.
+void computeInnerSpanPerSide(int y,
+                              int x0, int y0, int x1, int y1,
+                              const int rx[4], const int ry[4],
+                              int w_top, int w_right, int w_bottom, int w_left,
+                              int &xl2, int &xr2);
+
 /// returns true if styles are identical
 bool isSameFontStyle( css_style_rec_t * style1, css_style_rec_t * style2 );
 /// removes format data from node

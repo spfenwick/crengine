@@ -641,38 +641,10 @@ public:
                 if (y_abs < rounded_clip.top || y_abs >= rounded_clip.bottom) {
                     continue; // outside rounded vertical range
                 }
-                // Outer rect and corner centers
-                const int x0 = rounded_clip.left;
-                const int y0 = rounded_clip.top;
-                const int x1 = rounded_clip.right;
-                const int y1 = rounded_clip.bottom;
-                int xl = x0, xr = x1;
-                const int cx_tl = x0 + rrx[0]; const int cy_tl = y0 + rry[0];
-                const int cx_tr = x1 - rrx[1]; const int cy_tr = y0 + rry[1];
-                const int cx_br = x1 - rrx[2]; const int cy_br = y1 - rry[2];
-                const int cx_bl = x0 + rrx[3]; const int cy_bl = y1 - rry[3];
-                if (y_abs < y0 + rry[0] && rrx[0] && rry[0]) {
-                    const double dy = (double)(cy_tl - y_abs - 0.5);
-                    const double val = 1.0 - (dy*dy) / (double)(rry[0]*rry[0]);
-                    const int dx = (val <= 0.0) ? rrx[0] : (int)floor((double)rrx[0] * sqrt(val));
-                    const int cand = cx_tl - dx; if (xl < cand) xl = cand;
-                } else if (y_abs >= y1 - rry[3] && rrx[3] && rry[3]) {
-                    const double dy = (double)(y_abs - cy_bl + 0.5);
-                    const double val = 1.0 - (dy*dy) / (double)(rry[3]*rry[3]);
-                    const int dx = (val <= 0.0) ? rrx[3] : (int)floor((double)rrx[3] * sqrt(val));
-                    const int cand = cx_bl - dx; if (xl < cand) xl = cand;
-                }
-                if (y_abs < y0 + rry[1] && rrx[1] && rry[1]) {
-                    const double dy = (double)(cy_tr - y_abs - 0.5);
-                    const double val = 1.0 - (dy*dy) / (double)(rry[1]*rry[1]);
-                    const int dx = (val <= 0.0) ? rrx[1] : (int)floor((double)rrx[1] * sqrt(val));
-                    const int cand = cx_tr + dx; if (xr > cand) xr = cand;
-                } else if (y_abs >= y1 - rry[2] && rrx[2] && rry[2]) {
-                    const double dy = (double)(y_abs - cy_br + 0.5);
-                    const double val = 1.0 - (dy*dy) / (double)(rry[2]*rry[2]);
-                    const int dx = (val <= 0.0) ? rrx[2] : (int)floor((double)rrx[2] * sqrt(val));
-                    const int cand = cx_br + dx; if (xr > cand) xr = cand;
-                }
+                int xl, xr;
+                computeInnerSpanPerSide(y_abs, rounded_clip.left, rounded_clip.top,
+                                         rounded_clip.right, rounded_clip.bottom,
+                                         rrx, rry, 0, 0, 0, 0, xl, xr);
                 // Merge with regular clip
                 if (xl > xL) {
                     xL = xl;

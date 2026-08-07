@@ -104,46 +104,68 @@ static void computeBorderRadiiPx(ldomNode * node, css_style_rec_t * style, int b
     }
 }
 
+// Elliptical corner boundary helper: given a corner's radii and the vertical
+// distance from its center (already offset by the -0.5/+0.5 pixel-center
+// convention), returns the horizontal inset of the ellipse boundary at that
+// scanline (or the full radius once the scanline falls outside the corner's
+// vertical span).
+static inline int roundedCornerInsetDx(int rxc, int ryc, double dy) {
+    double val = 1.0 - (dy*dy) / (double)(ryc*ryc);
+    return (val <= 0.0) ? rxc : (int)floor((double)rxc * sqrt(val));
+}
+
+// Compute the horizontal span [xl2, xr2) at scanline y for a rounded rectangle
+// inset per-side by w_top, w_right, w_bottom, w_left (pass all zero for the
+// outer/unshrunk span). This is the single implementation of the per-scanline
+// elliptical-corner math shared by all the rounded-rect/border/background fill
+// routines below, and (via lvrend.h) by lvdrawbuf.cpp's per-scanline rounded
+// clip mask, so a rounding fix only ever needs to be made in one place.
+void computeInnerSpanPerSide(int y,
+                              int x0, int y0, int x1, int y1,
+                              const int rx[4], const int ry[4],
+                              int w_top, int w_right, int w_bottom, int w_left,
+                              int &xl2, int &xr2)
+{
+    int x0i = x0 + w_left, y0i = y0 + w_top, x1i = x1 - w_right, y1i = y1 - w_bottom;
+    if (x0i >= x1i || y0i >= y1i) { xl2 = xr2 = x0i; return; }
+    int rxi_tl = rx[0] > w_left ? rx[0] - w_left : 0;
+    int ryi_tl = ry[0] > w_top  ? ry[0] - w_top  : 0;
+    int rxi_tr = rx[1] > w_right ? rx[1] - w_right : 0;
+    int ryi_tr = ry[1] > w_top   ? ry[1] - w_top   : 0;
+    int rxi_br = rx[2] > w_right ? rx[2] - w_right : 0;
+    int ryi_br = ry[2] > w_bottom? ry[2] - w_bottom: 0;
+    int rxi_bl = rx[3] > w_left  ? rx[3] - w_left  : 0;
+    int ryi_bl = ry[3] > w_bottom? ry[3] - w_bottom: 0;
+    int cxi_tl = x0i + rxi_tl; int cyi_tl = y0i + ryi_tl;
+    int cxi_tr = x1i - rxi_tr; int cyi_tr = y0i + ryi_tr;
+    int cxi_br = x1i - rxi_br; int cyi_br = y1i - ryi_br;
+    int cxi_bl = x0i + rxi_bl; int cyi_bl = y1i - ryi_bl;
+    xl2 = x0i; xr2 = x1i;
+    if (y < y0i + ryi_tl && rxi_tl && ryi_tl) {
+        int dx = roundedCornerInsetDx(rxi_tl, ryi_tl, (double)(cyi_tl - y - 0.5));
+        int cand = cxi_tl - dx; if (xl2 < cand) xl2 = cand;
+    } else if (y >= y1i - ryi_bl && rxi_bl && ryi_bl) {
+        int dx = roundedCornerInsetDx(rxi_bl, ryi_bl, (double)(y - cyi_bl + 0.5));
+        int cand = cxi_bl - dx; if (xl2 < cand) xl2 = cand;
+    }
+    if (y < y0i + ryi_tr && rxi_tr && ryi_tr) {
+        int dx = roundedCornerInsetDx(rxi_tr, ryi_tr, (double)(cyi_tr - y - 0.5));
+        int cand = cxi_tr + dx; if (xr2 > cand) xr2 = cand;
+    } else if (y >= y1i - ryi_br && rxi_br && ryi_br) {
+        int dx = roundedCornerInsetDx(rxi_br, ryi_br, (double)(y - cyi_br + 0.5));
+        int cand = cxi_br + dx; if (xr2 > cand) xr2 = cand;
+    }
+}
+
 // Fill a rounded rectangle with potentially elliptical radii per corner
 static void fillRoundedRect(LVDrawBuf & drawbuf, int x0, int y0, int x1, int y1, const int rx[4], const int ry[4], lUInt32 color) {
     if (!(rx[0]||rx[1]||rx[2]||rx[3]||ry[0]||ry[1]||ry[2]||ry[3])) {
         drawbuf.FillRect(x0, y0, x1, y1, color);
         return;
     }
-    int cx_tl = x0 + rx[0]; int cy_tl = y0 + ry[0];
-    int cx_tr = x1 - rx[1]; int cy_tr = y0 + ry[1];
-    int cx_br = x1 - rx[2]; int cy_br = y1 - ry[2];
-    int cx_bl = x0 + rx[3]; int cy_bl = y1 - ry[3];
-
     for (int y = y0; y < y1; y++) {
-        int xl = x0;
-        int xr = x1;
-        if (y < y0 + ry[0] && rx[0] && ry[0]) {
-            double dy = (double)(cy_tl - y - 0.5);
-            double val = 1.0 - (dy*dy) / (double)(ry[0]*ry[0]);
-            int dx = (val <= 0.0) ? rx[0] : (int)floor((double)rx[0] * sqrt(val));
-            int cand = cx_tl - dx;
-            xl = (xl > cand ? xl : cand);
-        } else if (y >= y1 - ry[3] && rx[3] && ry[3]) {
-            double dy = (double)(y - cy_bl + 0.5);
-            double val = 1.0 - (dy*dy) / (double)(ry[3]*ry[3]);
-            int dx = (val <= 0.0) ? rx[3] : (int)floor((double)rx[3] * sqrt(val));
-            int cand = cx_bl - dx;
-            xl = (xl > cand ? xl : cand);
-        }
-        if (y < y0 + ry[1] && rx[1] && ry[1]) {
-            double dy = (double)(cy_tr - y - 0.5);
-            double val = 1.0 - (dy*dy) / (double)(ry[1]*ry[1]);
-            int dx = (val <= 0.0) ? rx[1] : (int)floor((double)rx[1] * sqrt(val));
-            int cand = cx_tr + dx;
-            xr = (xr < cand ? xr : cand);
-        } else if (y >= y1 - ry[2] && rx[2] && ry[2]) {
-            double dy = (double)(y - cy_br + 0.5);
-            double val = 1.0 - (dy*dy) / (double)(ry[2]*ry[2]);
-            int dx = (val <= 0.0) ? rx[2] : (int)floor((double)rx[2] * sqrt(val));
-            int cand = cx_br + dx;
-            xr = (xr < cand ? xr : cand);
-        }
+        int xl, xr;
+        computeInnerSpanPerSide(y, x0, y0, x1, y1, rx, ry, 0, 0, 0, 0, xl, xr);
         if (xl < xr)
             drawbuf.FillRect(xl, y, xr, y+1, color);
     }
@@ -167,82 +189,26 @@ static void fillRoundedRectRing(LVDrawBuf & drawbuf, int x0, int y0, int x1, int
         drawbuf.FillRect(x1-w, y0+w, x1, y1-w, color);
         return;
     }
-    // Outer corner centers
-    int cx_tl = x0 + rx[0]; int cy_tl = y0 + ry[0];
-    int cx_tr = x1 - rx[1]; int cy_tr = y0 + ry[1];
-    int cx_br = x1 - rx[2]; int cy_br = y1 - ry[2];
-    int cx_bl = x0 + rx[3]; int cy_bl = y1 - ry[3];
-
-    // Inner box and radii (clamped to >= 0)
-    int x0i = x0 + w, y0i = y0 + w, x1i = x1 - w, y1i = y1 - w;
-    if (x0i >= x1i || y0i >= y1i)
+    // Inner box, for the flat top/bottom-band vertical range test below
+    int y0i = y0 + w, y1i = y1 - w;
+    if (x0 + w >= x1 - w || y0i >= y1i)
         return;
-    int rxi[4], ryi[4];
-    for (int i=0;i<4;i++) { rxi[i] = rx[i] > w ? rx[i] - w : 0; ryi[i] = ry[i] > w ? ry[i] - w : 0; }
-    int cxi_tl = x0i + rxi[0]; int cyi_tl = y0i + ryi[0];
-    int cxi_tr = x1i - rxi[1]; int cyi_tr = y0i + ryi[1];
-    int cxi_br = x1i - rxi[2]; int cyi_br = y1i - ryi[2];
-    int cxi_bl = x0i + rxi[3]; int cyi_bl = y1i - ryi[3];
 
     for (int y = y0; y < y1; y++) {
         // Outer span
-        int xl = x0;
-        int xr = x1;
-        if (y < y0 + ry[0] && rx[0] && ry[0]) {
-            double dy = (double)(cy_tl - y - 0.5);
-            double val = 1.0 - (dy*dy) / (double)(ry[0]*ry[0]);
-            int dx = (val <= 0.0) ? rx[0] : (int)floor((double)rx[0] * sqrt(val));
-            int cand = cx_tl - dx; if (xl < cand) xl = cand;
-        } else if (y >= y1 - ry[3] && rx[3] && ry[3]) {
-            double dy = (double)(y - cy_bl + 0.5);
-            double val = 1.0 - (dy*dy) / (double)(ry[3]*ry[3]);
-            int dx = (val <= 0.0) ? rx[3] : (int)floor((double)rx[3] * sqrt(val));
-            int cand = cx_bl - dx; if (xl < cand) xl = cand;
-        }
-        if (y < y0 + ry[1] && rx[1] && ry[1]) {
-            double dy = (double)(cy_tr - y - 0.5);
-            double val = 1.0 - (dy*dy) / (double)(ry[1]*ry[1]);
-            int dx = (val <= 0.0) ? rx[1] : (int)floor((double)rx[1] * sqrt(val));
-            int cand = cx_tr + dx; if (xr > cand) xr = cand;
-        } else if (y >= y1 - ry[2] && rx[2] && ry[2]) {
-            double dy = (double)(y - cy_br + 0.5);
-            double val = 1.0 - (dy*dy) / (double)(ry[2]*ry[2]);
-            int dx = (val <= 0.0) ? rx[2] : (int)floor((double)rx[2] * sqrt(val));
-            int cand = cx_br + dx; if (xr > cand) xr = cand;
-        }
+        int xl, xr;
+        computeInnerSpanPerSide(y, x0, y0, x1, y1, rx, ry, 0, 0, 0, 0, xl, xr);
 
         // Top/bottom bands: fill full width of the ring
-        if (y < y0 + w || y >= y1 - w) {
+        if (y < y0i || y >= y1i) {
             if (xl < xr)
                 drawbuf.FillRect(xl, y, xr, y+1, color);
             continue;
         }
 
-        // Inner span (middle region)
-        int xl2 = x0i;
-        int xr2 = x1i;
-        if (y < y0i + ryi[0] && rxi[0] && ryi[0]) {
-            double dy = (double)(cyi_tl - y - 0.5);
-            double val = 1.0 - (dy*dy) / (double)(ryi[0]*ryi[0]);
-            int dx = (val <= 0.0) ? rxi[0] : (int)floor((double)rxi[0] * sqrt(val));
-            int cand = cxi_tl - dx; if (xl2 < cand) xl2 = cand;
-        } else if (y >= y1i - ryi[3] && rxi[3] && ryi[3]) {
-            double dy = (double)(y - cyi_bl + 0.5);
-            double val = 1.0 - (dy*dy) / (double)(ryi[3]*ryi[3]);
-            int dx = (val <= 0.0) ? rxi[3] : (int)floor((double)rxi[3] * sqrt(val));
-            int cand = cxi_bl - dx; if (xl2 < cand) xl2 = cand;
-        }
-        if (y < y0i + ryi[1] && rxi[1] && ryi[1]) {
-            double dy = (double)(cyi_tr - y - 0.5);
-            double val = 1.0 - (dy*dy) / (double)(ryi[1]*ryi[1]);
-            int dx = (val <= 0.0) ? rxi[1] : (int)floor((double)rxi[1] * sqrt(val));
-            int cand = cxi_tr + dx; if (xr2 > cand) xr2 = cand;
-        } else if (y >= y1i - ryi[2] && rxi[2] && ryi[2]) {
-            double dy = (double)(y - cyi_br + 0.5);
-            double val = 1.0 - (dy*dy) / (double)(ryi[2]*ryi[2]);
-            int dx = (val <= 0.0) ? rxi[2] : (int)floor((double)rxi[2] * sqrt(val));
-            int cand = cxi_br + dx; if (xr2 > cand) xr2 = cand;
-        }
+        // Inner span (middle region), shrunk by w on all sides
+        int xl2, xr2;
+        computeInnerSpanPerSide(y, x0, y0, x1, y1, rx, ry, w, w, w, w, xl2, xr2);
 
         // Draw left and right border segments of the ring
         if (xl < xl2)
@@ -460,53 +426,6 @@ static void fillRoundedRectDashedRing(LVDrawBuf & drawbuf, int x0, int y0, int x
     }
 }
 
-// Compute the inner horizontal span [xl2, xr2) at scanline y for a rounded rectangle
-// inset per-side by w_top, w_right, w_bottom, w_left.
-static inline void computeInnerSpanPerSide(int y,
-                                           int x0, int y0, int x1, int y1,
-                                           const int rx[4], const int ry[4],
-                                           int w_top, int w_right, int w_bottom, int w_left,
-                                           int &xl2, int &xr2)
-{
-    int x0i = x0 + w_left, y0i = y0 + w_top, x1i = x1 - w_right, y1i = y1 - w_bottom;
-    if (x0i >= x1i || y0i >= y1i) { xl2 = xr2 = x0i; return; }
-    int rxi_tl = rx[0] > w_left ? rx[0] - w_left : 0;
-    int ryi_tl = ry[0] > w_top  ? ry[0] - w_top  : 0;
-    int rxi_tr = rx[1] > w_right ? rx[1] - w_right : 0;
-    int ryi_tr = ry[1] > w_top   ? ry[1] - w_top   : 0;
-    int rxi_br = rx[2] > w_right ? rx[2] - w_right : 0;
-    int ryi_br = ry[2] > w_bottom? ry[2] - w_bottom: 0;
-    int rxi_bl = rx[3] > w_left  ? rx[3] - w_left  : 0;
-    int ryi_bl = ry[3] > w_bottom? ry[3] - w_bottom: 0;
-    int cxi_tl = x0i + rxi_tl; int cyi_tl = y0i + ryi_tl;
-    int cxi_tr = x1i - rxi_tr; int cyi_tr = y0i + ryi_tr;
-    int cxi_br = x1i - rxi_br; int cyi_br = y1i - ryi_br;
-    int cxi_bl = x0i + rxi_bl; int cyi_bl = y1i - ryi_bl;
-    xl2 = x0i; xr2 = x1i;
-    if (y < y0i + ryi_tl && rxi_tl && ryi_tl) {
-        double dy = (double)(cyi_tl - y - 0.5);
-        double val = 1.0 - (dy*dy) / (double)(ryi_tl*ryi_tl);
-        int dx = (val <= 0.0) ? rxi_tl : (int)floor((double)rxi_tl * sqrt(val));
-        int cand = cxi_tl - dx; if (xl2 < cand) xl2 = cand;
-    } else if (y >= y1i - ryi_bl && rxi_bl && ryi_bl) {
-        double dy = (double)(y - cyi_bl + 0.5);
-        double val = 1.0 - (dy*dy) / (double)(ryi_bl*ryi_bl);
-        int dx = (val <= 0.0) ? rxi_bl : (int)floor((double)rxi_bl * sqrt(val));
-        int cand = cxi_bl - dx; if (xl2 < cand) xl2 = cand;
-    }
-    if (y < y0i + ryi_tr && rxi_tr && ryi_tr) {
-        double dy = (double)(cyi_tr - y - 0.5);
-        double val = 1.0 - (dy*dy) / (double)(ryi_tr*ryi_tr);
-        int dx = (val <= 0.0) ? rxi_tr : (int)floor((double)rxi_tr * sqrt(val));
-        int cand = cxi_tr + dx; if (xr2 > cand) xr2 = cand;
-    } else if (y >= y1i - ryi_br && rxi_br && ryi_br) {
-        double dy = (double)(y - cyi_br + 0.5);
-        double val = 1.0 - (dy*dy) / (double)(ryi_br*ryi_br);
-        int dx = (val <= 0.0) ? rxi_br : (int)floor((double)rxi_br * sqrt(val));
-        int cand = cxi_br + dx; if (xr2 > cand) xr2 = cand;
-    }
-}
-
 // Draw only a band of the rounded border: for each side, draw the region between
 // inner widths w0_side and w1_side (cumulative from the outer edge), with a given color.
 // Requires w1_side >= w0_side for each side; pass 0 width to skip a side.
@@ -516,38 +435,10 @@ static void fillRoundedRectBorderSidesBand(LVDrawBuf & drawbuf, int x0, int y0, 
                                            int w1_top, int w1_right, int w1_bottom, int w1_left,
                                            const lUInt32 colors[4])
 {
-    // Precompute outer corner centers (same as above)
-    int cx_tl = x0 + rx[0]; int cy_tl = y0 + ry[0];
-    int cx_tr = x1 - rx[1]; int cy_tr = y0 + ry[1];
-    int cx_br = x1 - rx[2]; int cy_br = y1 - ry[2];
-    int cx_bl = x0 + rx[3]; int cy_bl = y1 - ry[3];
-
     for (int y = y0; y < y1; y++) {
         // Outer span
-        int xl = x0;
-        int xr = x1;
-        if (y < y0 + ry[0] && rx[0] && ry[0]) {
-            double dy = (double)(cy_tl - y - 0.5);
-            double val = 1.0 - (dy*dy) / (double)(ry[0]*ry[0]);
-            int dx = (val <= 0.0) ? rx[0] : (int)floor((double)rx[0] * sqrt(val));
-            int cand = cx_tl - dx; if (xl < cand) xl = cand;
-        } else if (y >= y1 - ry[3] && rx[3] && ry[3]) {
-            double dy = (double)(y - cy_bl + 0.5);
-            double val = 1.0 - (dy*dy) / (double)(ry[3]*ry[3]);
-            int dx = (val <= 0.0) ? rx[3] : (int)floor((double)rx[3] * sqrt(val));
-            int cand = cx_bl - dx; if (xl < cand) xl = cand;
-        }
-        if (y < y0 + ry[1] && rx[1] && ry[1]) {
-            double dy = (double)(cy_tr - y - 0.5);
-            double val = 1.0 - (dy*dy) / (double)(ry[1]*ry[1]);
-            int dx = (val <= 0.0) ? rx[1] : (int)floor((double)rx[1] * sqrt(val));
-            int cand = cx_tr + dx; if (xr > cand) xr = cand;
-        } else if (y >= y1 - ry[2] && rx[2] && ry[2]) {
-            double dy = (double)(y - cy_br + 0.5);
-            double val = 1.0 - (dy*dy) / (double)(ry[2]*ry[2]);
-            int dx = (val <= 0.0) ? rx[2] : (int)floor((double)rx[2] * sqrt(val));
-            int cand = cx_br + dx; if (xr > cand) xr = cand;
-        }
+        int xl, xr;
+        computeInnerSpanPerSide(y, x0, y0, x1, y1, rx, ry, 0, 0, 0, 0, xl, xr);
         if (!(xl < xr))
             continue;
 
@@ -10152,35 +10043,9 @@ void DrawBorder(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int doc_x,int 
                 auto draw_band_lr_dashed = [&](int w0_top,int w0_right,int w0_bottom,int w0_left,
                                                int w1_top,int w1_right,int w1_bottom,int w1_left,
                                                const lUInt32 colors[4]) {
-                    // Precompute outer corner centers
-                    int cx_tl = X0 + rx[0]; int cy_tl = Y0 + ry[0];
-                    int cx_tr = X1 - rx[1]; int cy_tr = Y0 + ry[1];
-                    int cx_br = X1 - rx[2]; int cy_br = Y1 - ry[2];
-                    int cx_bl = X0 + rx[3]; int cy_bl = Y1 - ry[3];
                     for (int y = Y0; y < Y1; y++) {
-                        int xl = X0, xr = X1;
-                        if (y < Y0 + ry[0] && rx[0] && ry[0]) {
-                            double dy = (double)(cy_tl - y - 0.5);
-                            double val = 1.0 - (dy*dy) / (double)(ry[0]*ry[0]);
-                            int dx = (val <= 0.0) ? rx[0] : (int)floor((double)rx[0] * sqrt(val));
-                            int cand = cx_tl - dx; if (xl < cand) xl = cand;
-                        } else if (y >= Y1 - ry[3] && rx[3] && ry[3]) {
-                            double dy = (double)(y - cy_bl + 0.5);
-                            double val = 1.0 - (dy*dy) / (double)(ry[3]*ry[3]);
-                            int dx = (val <= 0.0) ? rx[3] : (int)floor((double)rx[3] * sqrt(val));
-                            int cand = cx_bl - dx; if (xl < cand) xl = cand;
-                        }
-                        if (y < Y0 + ry[1] && rx[1] && ry[1]) {
-                            double dy = (double)(cy_tr - y - 0.5);
-                            double val = 1.0 - (dy*dy) / (double)(ry[1]*ry[1]);
-                            int dx = (val <= 0.0) ? rx[1] : (int)floor((double)rx[1] * sqrt(val));
-                            int cand = cx_tr + dx; if (xr > cand) xr = cand;
-                        } else if (y >= Y1 - ry[2] && rx[2] && ry[2]) {
-                            double dy = (double)(y - cy_br + 0.5);
-                            double val = 1.0 - (dy*dy) / (double)(ry[2]*ry[2]);
-                            int dx = (val <= 0.0) ? rx[2] : (int)floor((double)rx[2] * sqrt(val));
-                            int cand = cx_br + dx; if (xr > cand) xr = cand;
-                        }
+                        int xl, xr;
+                        computeInnerSpanPerSide(y, X0, Y0, X1, Y1, rx, ry, 0, 0, 0, 0, xl, xr);
                         if (!(xl < xr)) continue;
                         // Left
                         if (w1_left > w0_left && (side_is_dashed[3] || side_is_dotted[3])) {
@@ -10213,34 +10078,9 @@ void DrawBorder(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int doc_x,int 
                 auto draw_band_tb_dashed = [&](int w0_top,int w0_right,int w0_bottom,int w0_left,
                                                int w1_top,int w1_right,int w1_bottom,int w1_left,
                                                const lUInt32 colors[4]) {
-                    int cx_tl = X0 + rx[0]; int cy_tl = Y0 + ry[0];
-                    int cx_tr = X1 - rx[1]; int cy_tr = Y0 + ry[1];
-                    int cx_br = X1 - rx[2]; int cy_br = Y1 - ry[2];
-                    int cx_bl = X0 + rx[3]; int cy_bl = Y1 - ry[3];
                     for (int y = Y0; y < Y1; y++) {
-                        int xl = X0, xr = X1;
-                        if (y < Y0 + ry[0] && rx[0] && ry[0]) {
-                            double dy = (double)(cy_tl - y - 0.5);
-                            double val = 1.0 - (dy*dy) / (double)(ry[0]*ry[0]);
-                            int dx = (val <= 0.0) ? rx[0] : (int)floor((double)rx[0] * sqrt(val));
-                            int cand = cx_tl - dx; if (xl < cand) xl = cand;
-                        } else if (y >= Y1 - ry[3] && rx[3] && ry[3]) {
-                            double dy = (double)(y - cy_bl + 0.5);
-                            double val = 1.0 - (dy*dy) / (double)(ry[3]*ry[3]);
-                            int dx = (val <= 0.0) ? rx[3] : (int)floor((double)rx[3] * sqrt(val));
-                            int cand = cx_bl - dx; if (xl < cand) xl = cand;
-                        }
-                        if (y < Y0 + ry[1] && rx[1] && ry[1]) {
-                            double dy = (double)(cy_tr - y - 0.5);
-                            double val = 1.0 - (dy*dy) / (double)(ry[1]*ry[1]);
-                            int dx = (val <= 0.0) ? rx[1] : (int)floor((double)rx[1] * sqrt(val));
-                            int cand = cx_tr + dx; if (xr > cand) xr = cand;
-                        } else if (y >= Y1 - ry[2] && rx[2] && ry[2]) {
-                            double dy = (double)(y - cy_br + 0.5);
-                            double val = 1.0 - (dy*dy) / (double)(ry[2]*ry[2]);
-                            int dx = (val <= 0.0) ? rx[2] : (int)floor((double)rx[2] * sqrt(val));
-                            int cand = cx_br + dx; if (xr > cand) xr = cand;
-                        }
+                        int xl, xr;
+                        computeInnerSpanPerSide(y, X0, Y0, X1, Y1, rx, ry, 0, 0, 0, 0, xl, xr);
                         if (!(xl < xr)) continue;
                         // Top band rows
                         if (w1_top > w0_top && y >= Y0 + w0_top && y < Y0 + w1_top && (side_is_dashed[0] || side_is_dotted[0])) {
