@@ -342,11 +342,12 @@ static void crEmitSegRange(FT_Stroker stroker, const CRPerimeterSeg &sg, double 
 // when the run straddles an edge/arc seam, since one subpath can chain
 // LineTo/CubicTo across several underlying segments, with only a join (set to
 // ROUND on the stroker below) at each internal seam, never a cap.
-static void crEmitDashRun(FT_Stroker stroker, const CRPerimeterSeg segs[8], const double prefix[9],
+static void crEmitDashRun(FT_Stroker stroker, const CRPerimeterSeg *segs, const double *prefix, int numSegs,
                            double d0, double d1, double originX, double originY, double bmpH) {
-    int segIdx0 = 7, segIdx1 = 7;
-    for (int i = 0; i < 8; i++) { if (d0 <= prefix[i+1] || i == 7) { segIdx0 = i; break; } }
-    for (int i = 0; i < 8; i++) { if (d1 <= prefix[i+1] || i == 7) { segIdx1 = i; break; } }
+    int last = numSegs - 1;
+    int segIdx0 = last, segIdx1 = last;
+    for (int i = 0; i < numSegs; i++) { if (d0 <= prefix[i+1] || i == last) { segIdx0 = i; break; } }
+    for (int i = 0; i < numSegs; i++) { if (d1 <= prefix[i+1] || i == last) { segIdx1 = i; break; } }
     double local0 = d0 - prefix[segIdx0];
 
     double sx, sy;
@@ -374,10 +375,11 @@ static void crEmitDashRun(FT_Stroker stroker, const CRPerimeterSeg segs[8], cons
 // assuming at least one point was ever added to the border), so the second
 // point is nudged by 1 unit (1/64px, imperceptible at any real resolution)
 // to keep the subpath non-degenerate while still rendering as a clean circle.
-static void crEmitDot(FT_Stroker stroker, const CRPerimeterSeg segs[8], const double prefix[9],
+static void crEmitDot(FT_Stroker stroker, const CRPerimeterSeg *segs, const double *prefix, int numSegs,
                        double mid, double originX, double originY, double bmpH) {
-    int segIdx = 7;
-    for (int i = 0; i < 8; i++) { if (mid <= prefix[i+1] || i == 7) { segIdx = i; break; } }
+    int last = numSegs - 1;
+    int segIdx = last;
+    for (int i = 0; i < numSegs; i++) { if (mid <= prefix[i+1] || i == last) { segIdx = i; break; } }
     double px, py;
     crPointOnSeg(segs[segIdx], mid - prefix[segIdx], px, py);
     FT_Vector p0 = crToFTPoint(px, py, originX, originY, bmpH);
@@ -491,9 +493,9 @@ static void fillRoundedRectDashedRing(LVDrawBuf & drawbuf, int x0, int y0, int x
 
     for (const CRRun &r : runs) {
         if (dotted)
-            crEmitDot(stroker, segs, prefix, (r.d0 + r.d1) * 0.5, originX, originY, (double)bmpH);
+            crEmitDot(stroker, segs, prefix, 8, (r.d0 + r.d1) * 0.5, originX, originY, (double)bmpH);
         else
-            crEmitDashRun(stroker, segs, prefix, r.d0, r.d1, originX, originY, (double)bmpH);
+            crEmitDashRun(stroker, segs, prefix, 8, r.d0, r.d1, originX, originY, (double)bmpH);
     }
 
     FT_UInt numPoints = 0, numContours = 0;
@@ -651,85 +653,323 @@ static void fillRoundedRectRing(LVDrawBuf & drawbuf, int x0, int y0, int x1, int
     drawbuf.SetTextColor(prevColor);
 }
 
-// Draw only a band of the rounded border: for each side, draw the region between
-// inner widths w0_side and w1_side (cumulative from the outer edge), with a given color.
-// Requires w1_side >= w0_side for each side; pass 0 width to skip a side.
-static void fillRoundedRectBorderSidesBand(LVDrawBuf & drawbuf, int x0, int y0, int x1, int y1,
-                                           const int rx[4], const int ry[4],
-                                           int w0_top, int w0_right, int w0_bottom, int w0_left,
-                                           int w1_top, int w1_right, int w1_bottom, int w1_left,
-                                           const lUInt32 colors[4])
-{
-    for (int y = y0; y < y1; y++) {
-        // Outer span
-        int xl, xr;
-        computeInnerSpanPerSide(y, x0, y0, x1, y1, rx, ry, 0, 0, 0, 0, xl, xr);
-        if (!(xl < xr))
-            continue;
+// ---------------------------------------------------------------------------
+// General ("mixed-style") per-side border rendering: any side differs from
+// the others in width, style, or color, not all four sides are present, or
+// the style is double/groove/ridge/inset/outset (even if uniform), so the
+// uniform fast paths above (fillRoundedRectRing / fillRoundedRectDashedRing)
+// don't apply.
+//
+// Each side is rendered independently as its own shape, joined to its two
+// neighbors along the angular bisector of the corner arc they share -- the
+// same diagonal-miter convention CSS uses for straight corners (a line from
+// the outer corner to the inner corner), generalized to rounded corners by
+// using the bisector angle of the shared elliptical arc instead of a fixed
+// 45-degree line. This replaces the old scanline code's "whichever adjacent
+// side is thicker wins the whole corner outright" rule with an actual miter,
+// so two differently-styled/colored/widthed sides meet the way a browser
+// renders them instead of one side overwriting the other's corner.
+// ---------------------------------------------------------------------------
 
-        // Left band (draw before TB; taper inner edge with top/bottom insets)
-        if (w1_left > w0_left) {
-            int xl0, xr0, xl1, xr1;
-            computeInnerSpanPerSide(y, x0, y0, x1, y1, rx, ry, w0_top, 0, w0_bottom, w0_left, xl0, xr0);
-            computeInnerSpanPerSide(y, x0, y0, x1, y1, rx, ry, w1_top, 0, w1_bottom, w1_left, xl1, xr1);
-            int xa = xl0, xb = xl1; if (xa < xl) xa = xl; if (xb > xr) xb = xr;
-            if (xa < xb) drawbuf.FillRect(xa, y, xb, y+1, colors[3]);
-        }
-        // Right band (draw before TB; taper inner edge with top/bottom insets)
-        if (w1_right > w0_right) {
-            int xl0, xr0, xl1, xr1;
-            computeInnerSpanPerSide(y, x0, y0, x1, y1, rx, ry, w0_top, w0_right, w0_bottom, 0, xl0, xr0);
-            computeInnerSpanPerSide(y, x0, y0, x1, y1, rx, ry, w1_top, w1_right, w1_bottom, 0, xl1, xr1);
-            int xa = xr1, xb = xr0; if (xa < xl) xa = xl; if (xb > xr) xb = xr;
-            if (xa < xb) drawbuf.FillRect(xa, y, xb, y+1, colors[1]);
-        }
-        // Top band: keep outer edge un-clipped by sides; morph inner edge with side insets; draw only in its vertical range
-        if (w1_top > w0_top && y >= y0 + w0_top && y < y0 + w1_top) {
-            int xl0, xr0, xl1, xr1;
-            // Outer edge at w0_top with zero side insets (prevents LR from clipping TB)
-            computeInnerSpanPerSide(y, x0, y0, x1, y1, rx, ry, w0_top, 0, 0, 0, xl0, xr0);
-            // Inner edge at w1_top, tapered with side insets for smooth morph
-            computeInnerSpanPerSide(y, x0, y0, x1, y1, rx, ry, w1_top, w1_right, 0, w1_left, xl1, xr1);
-            bool filled = false;
-            // Only draw the left corner cap if top is at least as thick as left (let thicker side dominate)
-            if (w1_top >= w1_left) {
-                int xa = xl0, xb = xl1; if (xa < xl) xa = xl; if (xb > xr) xb = xr;
-                if (xa < xb) { drawbuf.FillRect(xa, y, xb, y+1, colors[0]); filled = true; }
-            }
-            // Only draw the right corner cap if top is at least as thick as right
-            if (w1_top >= w1_right) {
-                int xa = xr1, xb = xr0; if (xa < xl) xa = xl; if (xb > xr) xb = xr;
-                if (xa < xb) { drawbuf.FillRect(xa, y, xb, y+1, colors[0]); filled = true; }
-            }
-            if (!filled) {
-                // Fallback to ensure visibility
-                drawbuf.FillRect(xl, y, xr, y+1, colors[0]);
-            }
-        }
-        // Bottom band: keep outer edge un-clipped by sides; morph inner edge with side insets; draw only in its vertical range
-        if (w1_bottom > w0_bottom && y >= y1 - w1_bottom && y < y1 - w0_bottom) {
-            int xl0, xr0, xl1, xr1;
-            // Outer edge at w0_bottom with zero side insets
-            computeInnerSpanPerSide(y, x0, y0, x1, y1, rx, ry, 0, 0, w0_bottom, 0, xl0, xr0);
-            // Inner edge at w1_bottom, tapered with side insets
-            computeInnerSpanPerSide(y, x0, y0, x1, y1, rx, ry, 0, w1_right, w1_bottom, w1_left, xl1, xr1);
-            bool filled = false;
-            // Only draw the left corner cap if bottom is at least as thick as left
-            if (w1_bottom >= w1_left) {
-                int xa = xl0, xb = xl1; if (xa < xl) xa = xl; if (xb > xr) xb = xr;
-                if (xa < xb) { drawbuf.FillRect(xa, y, xb, y+1, colors[2]); filled = true; }
-            }
-            // Only draw the right corner cap if bottom is at least as thick as right
-            if (w1_bottom >= w1_right) {
-                int xa = xr1, xb = xr0; if (xa < xl) xa = xl; if (xb > xr) xb = xr;
-                if (xa < xb) { drawbuf.FillRect(xa, y, xb, y+1, colors[2]); filled = true; }
-            }
-            if (!filled) {
-                // Fallback to ensure visibility
-                drawbuf.FillRect(xl, y, xr, y+1, colors[2]);
-            }
+// Corners are numbered 0=TL,1=TR,2=BR,3=BL; each has a fixed angular range
+// (independent of any width) matching the segs[] convention used by the
+// uniform-ring code above, so a corner's bisector is always (t0+t1)/2.
+static const double CR_CORNER_T0[4] = { CRE_PI, -0.5*CRE_PI, 0.0, 0.5*CRE_PI };
+static const double CR_CORNER_T1[4] = { 1.5*CRE_PI, 0.0, 0.5*CRE_PI, CRE_PI };
+
+static inline void evalEllipsePt(double cx, double cy, double crx, double cry, double t, double &px, double &py) {
+    px = cx + crx*cos(t); py = cy + cry*sin(t);
+}
+
+// Corner ellipse (center + radii) at a given horizontal/vertical inset from
+// the outer box edge -- same shrink rule computeInnerSpanPerSide already
+// used (radius shrinks by the relevant inset, clamped at 0), just returning
+// the ellipse itself instead of a per-scanline span.
+static void cornerArcAt(int cornerIdx, int x0, int y0, int x1, int y1,
+                         const int rx[4], const int ry[4], double w_h, double w_v,
+                         double &cx, double &cy, double &crx, double &cry) {
+    crx = std::max(0.0, rx[cornerIdx] - w_h);
+    cry = std::max(0.0, ry[cornerIdx] - w_v);
+    switch (cornerIdx) {
+        case 0: cx = x0 + w_h + crx; cy = y0 + w_v + cry; break;
+        case 1: cx = x1 - w_h - crx; cy = y0 + w_v + cry; break;
+        case 2: cx = x1 - w_h - crx; cy = y1 - w_v - cry; break;
+        default: cx = x0 + w_h + crx; cy = y1 - w_v - cry; break;
+    }
+}
+
+// For a side (0=top,1=right,2=bottom,3=left) and one of its two corners
+// (isStart: true = the corner preceding this side clockwise, e.g. TL for
+// top; false = the corner following it, e.g. TR for top), returns which
+// corner index that is and the (w_h, w_v) inset to use for its arc at this
+// side's own inset w_own (0 <= w_own <= w_own_full, w_own_full being this
+// side's own total width -- e.g. tbw for top, regardless of which sub-band
+// boundary is currently being computed).
+//
+// w_own applies directly to the axis this side controls (e.g. vertical for a
+// top/bottom side). The OTHER (cross) axis is the full width of whichever
+// adjacent side meets it there, scaled by the SAME fraction (w_own /
+// w_own_full): at w_own=0 (the true outer edge) that's 0 -- the corner arc
+// there is the box's real, unshrunk radius, shared by every side regardless
+// of width -- and at w_own=w_own_full (this side's inner/padding edge) it's
+// the full adjacent width, so a straight (non-rounded) corner's inner
+// boundary lands exactly on the padding-box corner. Scaling every
+// intermediate sub-band boundary (e.g. groove's halfway line) by the same
+// fraction keeps the miter line straight all the way through the corner,
+// rather than only meeting correctly at the innermost boundary.
+static int sideCornerHV(int side, bool isStart, double w_own, double w_own_full,
+                         int tbw, int rbw, int bbw, int lbw, double &wh, double &wv) {
+    static const int cornerOf[4][2] = { {0,1}, {1,2}, {2,3}, {3,0} };
+    double frac = (w_own_full > 0.0) ? (w_own / w_own_full) : 0.0;
+    switch (side) {
+        case 0: wv = w_own; wh = (isStart ? lbw : rbw) * frac; break; // top
+        case 1: wh = w_own; wv = (isStart ? tbw : bbw) * frac; break; // right
+        case 2: wv = w_own; wh = (isStart ? rbw : lbw) * frac; break; // bottom
+        default: wh = w_own; wv = (isStart ? bbw : tbw) * frac; break; // left
+    }
+    return cornerOf[side][isStart ? 0 : 1];
+}
+
+// Appends one cubic-Bezier-approximated arc (from the outline's current
+// point, which must already be at t0's position) to a growable FT_Outline
+// point/tag buffer. Same tangent-based control-point construction as
+// crEmitSegRange's arc branch, just emitting raw outline points/tags instead
+// of going through FT_Stroker -- there's no stroking here, only a fill, so
+// there's no need for FT_Stroker's path-building API at all.
+static void crOutlineArcTo(std::vector<FT_Vector> &pts, std::vector<unsigned char> &tags,
+                            double cx, double cy, double crx, double cry, double t0, double t1,
+                            double originX, double originY, double bmpH) {
+    double sx, sy; evalEllipsePt(cx, cy, crx, cry, t0, sx, sy);
+    double ex, ey; evalEllipsePt(cx, cy, crx, cry, t1, ex, ey);
+    double k = (4.0/3.0) * tan((t1 - t0) / 4.0);
+    double c1x = sx + k*(-crx*sin(t0)), c1y = sy + k*( cry*cos(t0));
+    double c2x = ex - k*(-crx*sin(t1)), c2y = ey - k*( cry*cos(t1));
+    pts.push_back(crToFTPoint(c1x, c1y, originX, originY, bmpH)); tags.push_back(FT_CURVE_TAG_CUBIC);
+    pts.push_back(crToFTPoint(c2x, c2y, originX, originY, bmpH)); tags.push_back(FT_CURVE_TAG_CUBIC);
+    pts.push_back(crToFTPoint(ex, ey, originX, originY, bmpH));   tags.push_back(FT_CURVE_TAG_ON);
+}
+
+// Rasterizes a single-contour filled FT_Outline (already built in device-ish
+// local coordinates relative to originX/originY, height bmpH) and composites
+// it the same way the ring/dashed code above does: through
+// LVDrawBuf::Draw(x,y,bitmap,w,h,palette), the same call used for glyph
+// bitmaps, so it picks up per-bit-depth dithering for free and bypasses
+// _hidePartialGlyphs for the same reason described there.
+static void crFillOutlineAndBlit(LVDrawBuf &drawbuf, std::vector<FT_Vector> &pts, std::vector<unsigned char> &tags,
+                                  int originX, int originY, int bmpW, int bmpH, lUInt32 color) {
+    if (pts.size() < 3 || bmpW <= 0 || bmpH <= 0)
+        return;
+    FT_Library library = getBorderStrokeFTLibrary();
+    if (!library)
+        return;
+
+    FT_Outline outline;
+    memset(&outline, 0, sizeof(outline));
+    outline.n_points = (short)pts.size();
+    outline.n_contours = 1;
+    outline.points = pts.data();
+    outline.tags = tags.data();
+    unsigned short endIdx = (unsigned short)(pts.size() - 1);
+    outline.contours = &endIdx;
+    outline.flags = FT_OUTLINE_NONE;
+
+    std::vector<lUInt8> bmpBuf((size_t)bmpW * (size_t)bmpH, 0);
+    FT_Bitmap bmp;
+    memset(&bmp, 0, sizeof(bmp));
+    bmp.width = bmpW; bmp.rows = bmpH; bmp.pitch = bmpW;
+    bmp.buffer = bmpBuf.data(); bmp.pixel_mode = FT_PIXEL_MODE_GRAY; bmp.num_grays = 256;
+    FT_Outline_Get_Bitmap(library, &outline, &bmp);
+
+    lUInt32 prevColor = drawbuf.GetTextColor();
+    bool prevHide = drawbuf.getHidePartialGlyphs();
+    drawbuf.SetTextColor(color);
+    drawbuf.setHidePartialGlyphs(false);
+    drawbuf.Draw(originX, originY, bmpBuf.data(), bmpW, bmpH, NULL);
+    drawbuf.setHidePartialGlyphs(prevHide);
+    drawbuf.SetTextColor(prevColor);
+}
+
+// Fills one side's sub-band [w0,w1) (inset from the outer edge along that
+// side's own axis, cumulative -- e.g. groove's outer half passes [0,tbw/2),
+// its inner half [tbw/2,tbw)) as a single filled wedge: the sub-band's outer
+// and inner boundaries, each running from one corner's bisector angle to the
+// other's, closed at each end by a straight miter cut from the outer
+// boundary point to the inner boundary point at that same bisector angle.
+// Passing w0=0, w1=side's full width covers the plain solid-style case.
+static void fillSideWedge(LVDrawBuf &drawbuf, int x0, int y0, int x1, int y1,
+                           const int rx[4], const int ry[4],
+                           int tbw, int rbw, int bbw, int lbw,
+                           int side, double w0, double w1, lUInt32 color) {
+    if (w1 <= w0)
+        return;
+    const double sideFullW[4] = { (double)tbw, (double)rbw, (double)bbw, (double)lbw };
+    const double wFull = sideFullW[side];
+
+    double whA0, wvA0; int cA = sideCornerHV(side, true,  w0, wFull, tbw, rbw, bbw, lbw, whA0, wvA0);
+    double whA1, wvA1;        sideCornerHV(side, true,  w1, wFull, tbw, rbw, bbw, lbw, whA1, wvA1);
+    double whB0, wvB0; int cB = sideCornerHV(side, false, w0, wFull, tbw, rbw, bbw, lbw, whB0, wvB0);
+    double whB1, wvB1;        sideCornerHV(side, false, w1, wFull, tbw, rbw, bbw, lbw, whB1, wvB1);
+
+    double cxA0, cyA0, rxA0, ryA0; cornerArcAt(cA, x0, y0, x1, y1, rx, ry, whA0, wvA0, cxA0, cyA0, rxA0, ryA0);
+    double cxA1, cyA1, rxA1, ryA1; cornerArcAt(cA, x0, y0, x1, y1, rx, ry, whA1, wvA1, cxA1, cyA1, rxA1, ryA1);
+    double cxB0, cyB0, rxB0, ryB0; cornerArcAt(cB, x0, y0, x1, y1, rx, ry, whB0, wvB0, cxB0, cyB0, rxB0, ryB0);
+    double cxB1, cyB1, rxB1, ryB1; cornerArcAt(cB, x0, y0, x1, y1, rx, ry, whB1, wvB1, cxB1, cyB1, rxB1, ryB1);
+
+    double tA0 = CR_CORNER_T0[cA], tA1 = CR_CORNER_T1[cA], tmA = (tA0 + tA1) * 0.5;
+    double tB0 = CR_CORNER_T0[cB], tB1 = CR_CORNER_T1[cB], tmB = (tB0 + tB1) * 0.5;
+    (void)tA0; (void)tB1;
+
+    const int pad = 2; // AA slop only -- a wedge never extends past the outer box edge
+    const int originX = x0 - pad, originY = y0 - pad;
+    const int bmpW = (x1 - x0) + 2*pad;
+    const int bmpH = (y1 - y0) + 2*pad;
+
+    std::vector<FT_Vector> pts;
+    std::vector<unsigned char> tags;
+    pts.reserve(16); tags.reserve(16);
+    double px, py;
+
+    evalEllipsePt(cxA0, cyA0, rxA0, ryA0, tmA, px, py);
+    pts.push_back(crToFTPoint(px, py, originX, originY, (double)bmpH)); tags.push_back(FT_CURVE_TAG_ON);
+    crOutlineArcTo(pts, tags, cxA0, cyA0, rxA0, ryA0, tmA, tA1, originX, originY, (double)bmpH);
+
+    evalEllipsePt(cxB0, cyB0, rxB0, ryB0, tB0, px, py);
+    pts.push_back(crToFTPoint(px, py, originX, originY, (double)bmpH)); tags.push_back(FT_CURVE_TAG_ON);
+    crOutlineArcTo(pts, tags, cxB0, cyB0, rxB0, ryB0, tB0, tmB, originX, originY, (double)bmpH);
+
+    evalEllipsePt(cxB1, cyB1, rxB1, ryB1, tmB, px, py);
+    pts.push_back(crToFTPoint(px, py, originX, originY, (double)bmpH)); tags.push_back(FT_CURVE_TAG_ON);
+    crOutlineArcTo(pts, tags, cxB1, cyB1, rxB1, ryB1, tmB, tB0, originX, originY, (double)bmpH);
+
+    evalEllipsePt(cxA1, cyA1, rxA1, ryA1, tA1, px, py);
+    pts.push_back(crToFTPoint(px, py, originX, originY, (double)bmpH)); tags.push_back(FT_CURVE_TAG_ON);
+    crOutlineArcTo(pts, tags, cxA1, cyA1, rxA1, ryA1, tA1, tmA, originX, originY, (double)bmpH);
+    // Implicit contour close (FT connects the last point straight back to the
+    // first) is exactly the second miter cut, back to the outer-A point.
+
+    crFillOutlineAndBlit(drawbuf, pts, tags, originX, originY, bmpW, bmpH, color);
+}
+
+// Strokes one side's dashed/dotted band along its own centerline (the box
+// inset by half that side's width, using the same own-axis/cross-axis inset
+// rule as fillSideWedge above so the stroke's outer edge lines up with a
+// neighboring solid side's wedge boundary), scoped to just that side's span
+// of the perimeter (one corner-arc half, the straight edge, the other
+// corner-arc half) instead of the whole ring. Reuses the exact same
+// run-detection/crEmitDashRun/crEmitDot machinery fillRoundedRectDashedRing
+// uses for the uniform-ring fast path, just over a 3-segment sub-path.
+static void strokeSideDashedOrDotted(LVDrawBuf &drawbuf, int x0, int y0, int x1, int y1,
+                                      const int rx[4], const int ry[4],
+                                      int tbw, int rbw, int bbw, int lbw,
+                                      int side, int w_side, bool dotted, lUInt32 color) {
+    if (w_side <= 0)
+        return;
+    const double half = w_side / 2.0;
+
+    double whA, wvA; int cA = sideCornerHV(side, true,  half, (double)w_side, tbw, rbw, bbw, lbw, whA, wvA);
+    double whB, wvB; int cB = sideCornerHV(side, false, half, (double)w_side, tbw, rbw, bbw, lbw, whB, wvB);
+    double cxA, cyA, rxA, ryA; cornerArcAt(cA, x0, y0, x1, y1, rx, ry, whA, wvA, cxA, cyA, rxA, ryA);
+    double cxB, cyB, rxB, ryB; cornerArcAt(cB, x0, y0, x1, y1, rx, ry, whB, wvB, cxB, cyB, rxB, ryB);
+    double tA0 = CR_CORNER_T0[cA], tA1 = CR_CORNER_T1[cA], tmA = (tA0 + tA1) * 0.5;
+    double tB0 = CR_CORNER_T0[cB], tB1 = CR_CORNER_T1[cB], tmB = (tB0 + tB1) * 0.5;
+    (void)tA0; (void)tB1;
+
+    double edgeAx, edgeAy; evalEllipsePt(cxA, cyA, rxA, ryA, tA1, edgeAx, edgeAy);
+    double edgeBx, edgeBy; evalEllipsePt(cxB, cyB, rxB, ryB, tB0, edgeBx, edgeBy);
+
+    CRPerimeterSeg segs[3] = {
+        crMakeArcSeg(cxA, cyA, rxA, ryA, tmA, tA1),
+        crMakeEdgeSeg(edgeAx, edgeAy, edgeBx, edgeBy),
+        crMakeArcSeg(cxB, cyB, rxB, ryB, tB0, tmB),
+    };
+    double prefix[4] = {0.0};
+    for (int i = 0; i < 3; i++) prefix[i+1] = prefix[i] + segs[i].len;
+    const double totalLen = prefix[3];
+    if (totalLen <= 0.0)
+        return;
+
+    const int dash_len = dotted ? std::max(1, w_side) : std::max(1, 3*w_side);
+    const int gap_len = dash_len;
+    const int period = dash_len + gap_len;
+    auto is_on = [&](double pos) {
+        double p = fmod(pos, (double)period);
+        if (p < 0) p += period;
+        return p < dash_len;
+    };
+
+    struct CRRun { double d0, d1; };
+    std::vector<CRRun> runs;
+    const int totalSteps = std::max(1, (int)llround(totalLen));
+    int runStart = -1;
+    for (int i = 0; i <= totalSteps; i++) {
+        bool on = (i < totalSteps) && is_on((double)i);
+        if (on && runStart < 0) {
+            runStart = i;
+        } else if (!on && runStart >= 0) {
+            runs.push_back({(double)runStart, (double)i});
+            runStart = -1;
         }
     }
+    if (runs.empty())
+        return;
+
+    FT_Library library = getBorderStrokeFTLibrary();
+    if (!library)
+        return;
+    FT_Stroker stroker;
+    if (FT_Stroker_New(library, &stroker))
+        return;
+    FT_Stroker_Set(stroker, (FT_Fixed)llround(w_side * 0.5 * 64.0),
+                   dotted ? FT_STROKER_LINECAP_ROUND : FT_STROKER_LINECAP_BUTT,
+                   FT_STROKER_LINEJOIN_ROUND, 0);
+
+    const int pad = w_side/2 + 2;
+    const int originX = x0 - pad, originY = y0 - pad;
+    const int bmpW = (x1 - x0) + 2*pad;
+    const int bmpH = (y1 - y0) + 2*pad;
+    if (bmpW <= 0 || bmpH <= 0) {
+        FT_Stroker_Done(stroker);
+        return;
+    }
+
+    for (const CRRun &r : runs) {
+        if (dotted)
+            crEmitDot(stroker, segs, prefix, 3, (r.d0 + r.d1) * 0.5, originX, originY, (double)bmpH);
+        else
+            crEmitDashRun(stroker, segs, prefix, 3, r.d0, r.d1, originX, originY, (double)bmpH);
+    }
+
+    FT_UInt numPoints = 0, numContours = 0;
+    FT_Stroker_GetCounts(stroker, &numPoints, &numContours);
+    if (numPoints == 0 || numContours == 0) {
+        FT_Stroker_Done(stroker);
+        return;
+    }
+    FT_Outline outline;
+    if (FT_Outline_New(library, numPoints, numContours, &outline)) {
+        FT_Stroker_Done(stroker);
+        return;
+    }
+    outline.n_points = 0;
+    outline.n_contours = 0;
+    FT_Stroker_Export(stroker, &outline);
+    FT_Stroker_Done(stroker);
+
+    std::vector<lUInt8> bmpBuf((size_t)bmpW * (size_t)bmpH, 0);
+    FT_Bitmap bmp;
+    memset(&bmp, 0, sizeof(bmp));
+    bmp.width = bmpW; bmp.rows = bmpH; bmp.pitch = bmpW;
+    bmp.buffer = bmpBuf.data(); bmp.pixel_mode = FT_PIXEL_MODE_GRAY; bmp.num_grays = 256;
+    FT_Outline_Get_Bitmap(library, &outline, &bmp);
+    FT_Outline_Done(library, &outline);
+
+    lUInt32 prevColor = drawbuf.GetTextColor();
+    bool prevHide = drawbuf.getHidePartialGlyphs();
+    drawbuf.SetTextColor(color);
+    drawbuf.setHidePartialGlyphs(false);
+    drawbuf.Draw(originX, originY, bmpBuf.data(), bmpW, bmpH, NULL);
+    drawbuf.setHidePartialGlyphs(prevHide);
+    drawbuf.SetTextColor(prevColor);
 }
 
 // Uncomment for debugging enhanced block rendering
@@ -10226,243 +10466,55 @@ void DrawBorder(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int doc_x,int 
                     return c;
                 };
 
-                // Helpers to draw only LR or only TB for a band [w0..w1)
-                auto draw_band_lr = [&](int w0_top,int w0_right,int w0_bottom,int w0_left,
-                                        int w1_top,int w1_right,int w1_bottom,int w1_left,
-                                        const lUInt32 colors[4]) {
-                // Disable TB by making w1==w0 for TB sides
-                fillRoundedRectBorderSidesBand(drawbuf, X0, Y0, X1, Y1, rx, ry,
-                                               w0_top, w0_right, w0_bottom, w0_left,
-                                               w0_top, w1_right, w0_bottom, w1_left,
-                                               colors);
-                };
-                auto draw_band_tb = [&](int w0_top,int w0_right,int w0_bottom,int w0_left,
-                                        int w1_top,int w1_right,int w1_bottom,int w1_left,
-                                        const lUInt32 colors[4]) {
-                // Disable LR by making w1==w0 for LR sides; keep LR widths in w1_right/left for tapering of TB
-                fillRoundedRectBorderSidesBand(drawbuf, X0, Y0, X1, Y1, rx, ry,
-                                               w0_top, 0, w0_bottom, 0,
-                                               w1_top, w1_right, w1_bottom, w1_left,
-                                               colors);
-                };
-
-                // Dashed/dotted helpers
-                auto dash_on_v = [](int y, int startY, int dash_len, int gap_len) {
-                    int per = dash_len + gap_len; if (per <= 0) return true; // safety
-                    int p = (y - startY) % per; if (p < 0) p += per; return p < dash_len;
-                };
-                auto fill_h_dash_segment = [&](int y, int xa, int xb, int startX, int dash_len, int gap_len, lUInt32 color){
-                    if (xa >= xb) return;
-                    int per = dash_len + gap_len; if (per <= 0) { drawbuf.FillRect(xa, y, xb, y+1, color); return; }
-                    int x = xa;
-                    while (x < xb) {
-                        int p = (x - startX) % per; if (p < 0) p += per;
-                        int on = dash_len - p; if (on <= 0) { int adv = per - p; if (adv <= 0) adv = 1; x += adv; continue; }
-                        int xe = x + on; if (xe > xb) xe = xb;
-                        if (xe > x) drawbuf.FillRect(x, y, xe, y+1, color);
-                        x = xe + gap_len; // skip gap
+                // Render each side independently as its own filled wedge (or,
+                // for dashed/dotted, its own scoped stroke), joined to its
+                // neighbors along the shared corner's angular bisector -- see
+                // fillSideWedge/strokeSideDashedOrDotted above. Unlike the old
+                // LR-then-TB draw-order-dependent dispatch (where whichever
+                // side was thicker simply overwrote the corner), corner
+                // correctness here doesn't depend on draw order: each side's
+                // wedge is bounded by the exact same miter line its neighbor's
+                // wedge starts from, so sides can be done in any order.
+                int sideWidth[4] = { tbw, rbw, bbw, lbw };
+                for (int side = 0; side < 4; side++) {
+                    int w = sideWidth[side];
+                    lUInt32 c = sideColors[side];
+                    if (side_is_dashed[side] || side_is_dotted[side]) {
+                        strokeSideDashedOrDotted(drawbuf, X0, Y0, X1, Y1, rx, ry, tbw, rbw, bbw, lbw,
+                                                  side, w, side_is_dotted[side], c);
+                    } else if (side_is_solid[side]) {
+                        fillSideWedge(drawbuf, X0, Y0, X1, Y1, rx, ry, tbw, rbw, bbw, lbw,
+                                      side, 0, w, c);
+                    } else if (side_is_double[side]) {
+                        int gap = std::max(1, w/3);
+                        int outer = (w - gap)/2;
+                        int inner = w - gap - outer;
+                        fillSideWedge(drawbuf, X0, Y0, X1, Y1, rx, ry, tbw, rbw, bbw, lbw,
+                                      side, 0, outer, c);
+                        fillSideWedge(drawbuf, X0, Y0, X1, Y1, rx, ry, tbw, rbw, bbw, lbw,
+                                      side, w - inner, w, c);
+                    } else if (side_is_groove[side] || side_is_ridge[side]) {
+                        bool groove = side_is_groove[side];
+                        int half = std::max(1, w/2);
+                        // groove: shade outer/light inner on top+left, the
+                        // reverse on right+bottom; ridge is groove's opposite.
+                        // Matches the old per-side shading table exactly (see
+                        // the review comments this replaced for the derivation).
+                        bool outerIsShade = groove ? (side == 0 || side == 3) : (side == 1 || side == 2);
+                        lUInt32 cOuter = outerIsShade ? make_shade(c) : make_light(c);
+                        lUInt32 cInner = outerIsShade ? make_light(c) : make_shade(c);
+                        fillSideWedge(drawbuf, X0, Y0, X1, Y1, rx, ry, tbw, rbw, bbw, lbw,
+                                      side, 0, half, cOuter);
+                        fillSideWedge(drawbuf, X0, Y0, X1, Y1, rx, ry, tbw, rbw, bbw, lbw,
+                                      side, half, w, cInner);
+                    } else if (side_is_inset[side] || side_is_outset[side]) {
+                        bool inset = side_is_inset[side];
+                        // inset: shade on top+left, light on right+bottom; outset is the reverse.
+                        bool isShade = inset ? (side == 0 || side == 3) : (side == 1 || side == 2);
+                        lUInt32 cc = isShade ? make_shade(c) : make_light(c);
+                        fillSideWedge(drawbuf, X0, Y0, X1, Y1, rx, ry, tbw, rbw, bbw, lbw,
+                                      side, 0, w, cc);
                     }
-                };
-
-                // LR dashed bands
-                auto draw_band_lr_dashed = [&](int w0_top,int w0_right,int w0_bottom,int w0_left,
-                                               int w1_top,int w1_right,int w1_bottom,int w1_left,
-                                               const lUInt32 colors[4]) {
-                    for (int y = Y0; y < Y1; y++) {
-                        int xl, xr;
-                        computeInnerSpanPerSide(y, X0, Y0, X1, Y1, rx, ry, 0, 0, 0, 0, xl, xr);
-                        if (!(xl < xr)) continue;
-                        // Left
-                        if (w1_left > w0_left && (side_is_dashed[3] || side_is_dotted[3])) {
-                            int xl0, xr0, xl1, xr1;
-                            computeInnerSpanPerSide(y, X0, Y0, X1, Y1, rx, ry, w0_top, 0, w0_bottom, w0_left, xl0, xr0);
-                            computeInnerSpanPerSide(y, X0, Y0, X1, Y1, rx, ry, w1_top, 0, w1_bottom, w1_left, xl1, xr1);
-                            int xa = xl0; int xb = xl1; if (xa < xl) xa = xl; if (xb > xr) xb = xr;
-                            if (xa < xb) {
-                                int bw = lbw; int dash = side_is_dotted[3] ? std::max(1, bw) : std::max(1, 3*bw);
-                                int gap  = dash; // same length by convention used elsewhere
-                                if (dash_on_v(y, Y0, dash, gap)) drawbuf.FillRect(xa, y, xb, y+1, colors[3]);
-                            }
-                        }
-                        // Right
-                        if (w1_right > w0_right && (side_is_dashed[1] || side_is_dotted[1])) {
-                            int xl0, xr0, xl1, xr1;
-                            computeInnerSpanPerSide(y, X0, Y0, X1, Y1, rx, ry, w0_top, w0_right, w0_bottom, 0, xl0, xr0);
-                            computeInnerSpanPerSide(y, X0, Y0, X1, Y1, rx, ry, w1_top, w1_right, w1_bottom, 0, xl1, xr1);
-                            int xa = xr1; int xb = xr0; if (xa < xl) xa = xl; if (xb > xr) xb = xr;
-                            if (xa < xb) {
-                                int bw = rbw; int dash = side_is_dotted[1] ? std::max(1, bw) : std::max(1, 3*bw);
-                                int gap  = dash;
-                                if (dash_on_v(y, Y0, dash, gap)) drawbuf.FillRect(xa, y, xb, y+1, colors[1]);
-                            }
-                        }
-                    }
-                };
-
-                // TB dashed bands (with LR tapering)
-                auto draw_band_tb_dashed = [&](int w0_top,int w0_right,int w0_bottom,int w0_left,
-                                               int w1_top,int w1_right,int w1_bottom,int w1_left,
-                                               const lUInt32 colors[4]) {
-                    for (int y = Y0; y < Y1; y++) {
-                        int xl, xr;
-                        computeInnerSpanPerSide(y, X0, Y0, X1, Y1, rx, ry, 0, 0, 0, 0, xl, xr);
-                        if (!(xl < xr)) continue;
-                        // Top band rows
-                        if (w1_top > w0_top && y >= Y0 + w0_top && y < Y0 + w1_top && (side_is_dashed[0] || side_is_dotted[0])) {
-                            int xl0, xr0, xl1, xr1;
-                            computeInnerSpanPerSide(y, X0, Y0, X1, Y1, rx, ry, w0_top, 0, 0, 0, xl0, xr0);
-                            computeInnerSpanPerSide(y, X0, Y0, X1, Y1, rx, ry, w1_top, w1_right, 0, w1_left, xl1, xr1);
-                            int dash_len = side_is_dotted[0] ? std::max(1, tbw) : std::max(1, 3*tbw);
-                            int gap_len  = dash_len;
-                            bool drew = false;
-                            if (w1_top >= w1_left) {
-                                int xa = xl0; int xb = xl1; if (xa < xl) xa = xl; if (xb > xr) xb = xr;
-                                if (xa < xb) { fill_h_dash_segment(y, xa, xb, X0, dash_len, gap_len, colors[0]); drew = true; }
-                            }
-                            if (w1_top >= w1_right) {
-                                int xa = xr1; int xb = xr0; if (xa < xl) xa = xl; if (xb > xr) xb = xr;
-                                if (xa < xb) { fill_h_dash_segment(y, xa, xb, X0, dash_len, gap_len, colors[0]); drew = true; }
-                            }
-                            if (!drew) {
-                                fill_h_dash_segment(y, xl, xr, X0, dash_len, gap_len, colors[0]);
-                            }
-                        }
-                        // Bottom band rows
-                        if (w1_bottom > w0_bottom && y >= Y1 - w1_bottom && y < Y1 - w0_bottom && (side_is_dashed[2] || side_is_dotted[2])) {
-                            int xl0, xr0, xl1, xr1;
-                            computeInnerSpanPerSide(y, X0, Y0, X1, Y1, rx, ry, 0, 0, w0_bottom, 0, xl0, xr0);
-                            computeInnerSpanPerSide(y, X0, Y0, X1, Y1, rx, ry, 0, w1_right, w1_bottom, w1_left, xl1, xr1);
-                            int dash_len = side_is_dotted[2] ? std::max(1, bbw) : std::max(1, 3*bbw);
-                            int gap_len  = dash_len;
-                            bool drew = false;
-                            if (w1_bottom >= w1_left) {
-                                int xa = xl0; int xb = xl1; if (xa < xl) xa = xl; if (xb > xr) xb = xr;
-                                if (xa < xb) { fill_h_dash_segment(y, xa, xb, X0, dash_len, gap_len, colors[2]); drew = true; }
-                            }
-                            if (w1_bottom >= w1_right) {
-                                int xa = xr1; int xb = xr0; if (xa < xl) xa = xl; if (xb > xr) xb = xr;
-                                if (xa < xb) { fill_h_dash_segment(y, xa, xb, X0, dash_len, gap_len, colors[2]); drew = true; }
-                            }
-                            if (!drew) {
-                                fill_h_dash_segment(y, xl, xr, X0, dash_len, gap_len, colors[2]);
-                            }
-                        }
-                    }
-                };
-
-                // Phase 1: draw all Left/Right sides for each style
-                // DASHED/DOTTED LR
-                if (side_is_dashed[1] || side_is_dotted[1] || side_is_dashed[3] || side_is_dotted[3]) {
-                    lUInt32 c[4] = { sideColors[0], sideColors[1], sideColors[2], sideColors[3] };
-                    draw_band_lr_dashed(0,0,0,0, 0, side_is_dashed[1]||side_is_dotted[1]?rbw:0, 0, side_is_dashed[3]||side_is_dotted[3]?lbw:0, c);
-                }
-                // SOLID LR
-                if (side_is_solid[1] || side_is_solid[3]) {
-                    lUInt32 c[4] = { sideColors[0], sideColors[1], sideColors[2], sideColors[3] };
-                    int w0t=0, w0b=0;
-                    int w1r = side_is_solid[1] ? rbw : 0;
-                    int w1l = side_is_solid[3] ? lbw : 0;
-                    draw_band_lr(0,0,0,0, w0t, w1r, w0b, w1l, c);
-                }
-                // DOUBLE LR
-                if (side_is_double[1] || side_is_double[3]) {
-                    lUInt32 c[4] = { sideColors[0], sideColors[1], sideColors[2], sideColors[3] };
-                    auto thirds = [](int w){ return std::max(1, w/3); };
-                    int gap_r = thirds(rbw), gap_l = thirds(lbw);
-                    int outer_r = (rbw - gap_r)/2; int inner_r = rbw - gap_r - outer_r;
-                    int outer_l = (lbw - gap_l)/2; int inner_l = lbw - gap_l - outer_l;
-                    // Outer lines [0..outer)
-                    draw_band_lr(0,0,0,0, 0, side_is_double[1]?outer_r:0, 0, side_is_double[3]?outer_l:0, c);
-                    // Inner lines [w-inner..w]
-                    draw_band_lr(0, side_is_double[1]?(rbw-inner_r):0, 0, side_is_double[3]?(lbw-inner_l):0,
-                                 0, side_is_double[1]?rbw:0, 0, side_is_double[3]?lbw:0, c);
-                }
-                // GROOVE/RIDGE LR (outer half then inner half with opposite shading order)
-                if (side_is_groove[1] || side_is_groove[3] || side_is_ridge[1] || side_is_ridge[3]) {
-                    bool groove_r = side_is_groove[1], groove_l = side_is_groove[3];
-                    bool ridge_r = side_is_ridge[1],  ridge_l = side_is_ridge[3];
-                    int half_r = std::max(1, rbw/2), half_l = std::max(1, lbw/2);
-                    // Outer half
-                    lUInt32 c_outer[4] = { sideColors[0], sideColors[1], sideColors[2], sideColors[3] };
-                    // groove: left shade, right light; ridge: opposite
-                    if (groove_r || ridge_r) c_outer[1] = groove_r ? make_light(c_outer[1]) : make_shade(c_outer[1]);
-                    if (groove_l || ridge_l) c_outer[3] = groove_l ? make_shade(c_outer[3]) : make_light(c_outer[3]);
-                    draw_band_lr(0,0,0,0, 0, ridge_r||groove_r?half_r:0, 0, ridge_l||groove_l?half_l:0, c_outer);
-                    // Inner half
-                    lUInt32 c_inner[4] = { sideColors[0], sideColors[1], sideColors[2], sideColors[3] };
-                    if (groove_r || ridge_r) c_inner[1] = groove_r ? make_shade(c_inner[1]) : make_light(c_inner[1]);
-                    if (groove_l || ridge_l) c_inner[3] = groove_l ? make_light(c_inner[3]) : make_shade(c_inner[3]);
-                    draw_band_lr(0, ridge_r||groove_r?half_r:0, 0, ridge_l||groove_l?half_l:0,
-                                 0, ridge_r||groove_r?rbw:0, 0, ridge_l||groove_l?lbw:0, c_inner);
-                }
-                // INSET/OUTSET LR
-                if (side_is_inset[1] || side_is_inset[3] || side_is_outset[1] || side_is_outset[3]) {
-                    lUInt32 c[4] = { sideColors[0], sideColors[1], sideColors[2], sideColors[3] };
-                    // Inset: left shade, right light. Outset: left light, right shade.
-                    if (side_is_inset[1] || side_is_outset[1]) c[1] = side_is_inset[1] ? make_light(c[1]) : make_shade(c[1]);
-                    if (side_is_inset[3] || side_is_outset[3]) c[3] = side_is_inset[3] ? make_shade(c[3]) : make_light(c[3]);
-                    draw_band_lr(0,0,0,0, 0, side_is_inset[1]||side_is_outset[1]?rbw:0, 0, side_is_inset[3]||side_is_outset[3]?lbw:0, c);
-                }
-
-                // Phase 2: draw all Top/Bottom sides for each style (TB overlay corners)
-                // For TB tapering, always pass LR widths in w1_right/left
-                int taper_r = hasrightBorder ? rbw : 0;
-                int taper_l = hasleftBorder ? lbw : 0;
-
-                // DASHED/DOTTED TB
-                if (side_is_dashed[0] || side_is_dotted[0] || side_is_dashed[2] || side_is_dotted[2]) {
-                    lUInt32 c[4] = { sideColors[0], sideColors[1], sideColors[2], sideColors[3] };
-                    int w1t = side_is_dashed[0]||side_is_dotted[0] ? tbw : 0;
-                    int w1b = side_is_dashed[2]||side_is_dotted[2] ? bbw : 0;
-                    draw_band_tb_dashed(0, 0, 0, 0, w1t, taper_r, w1b, taper_l, c);
-                }
-                // SOLID TB
-                if (side_is_solid[0] || side_is_solid[2]) {
-                    lUInt32 c[4] = { sideColors[0], sideColors[1], sideColors[2], sideColors[3] };
-                    int w1t = side_is_solid[0] ? tbw : 0;
-                    int w1b = side_is_solid[2] ? bbw : 0;
-                    draw_band_tb(0, 0, 0, 0, w1t, taper_r, w1b, taper_l, c);
-                }
-                // DOUBLE TB
-                if (side_is_double[0] || side_is_double[2]) {
-                    lUInt32 c[4] = { sideColors[0], sideColors[1], sideColors[2], sideColors[3] };
-                    auto thirds = [](int w){ return std::max(1, w/3); };
-                    int gap_t = thirds(tbw), gap_b = thirds(bbw);
-                    int outer_t = (tbw - gap_t)/2; int inner_t = tbw - gap_t - outer_t;
-                    int outer_b = (bbw - gap_b)/2; int inner_b = bbw - gap_b - outer_b;
-                    // Outer
-                    draw_band_tb(0, 0, 0, 0, side_is_double[0]?outer_t:0, taper_r, side_is_double[2]?outer_b:0, taper_l, c);
-                    // Inner
-                    draw_band_tb(side_is_double[0]?(tbw-inner_t):0, 0, side_is_double[2]?(bbw-inner_b):0, 0,
-                                 side_is_double[0]?tbw:0, taper_r, side_is_double[2]?bbw:0, taper_l, c);
-                }
-                // GROOVE/RIDGE TB
-                if (side_is_groove[0] || side_is_groove[2] || side_is_ridge[0] || side_is_ridge[2]) {
-                    bool groove_t = side_is_groove[0], groove_b = side_is_groove[2];
-                    bool ridge_t = side_is_ridge[0],  ridge_b = side_is_ridge[2];
-                    int half_t = std::max(1, tbw/2), half_b = std::max(1, bbw/2);
-                    // Outer half
-                    lUInt32 c_outer[4] = { sideColors[0], sideColors[1], sideColors[2], sideColors[3] };
-                    // groove: top shade, bottom light; ridge: opposite
-                    if (groove_t || ridge_t) c_outer[0] = groove_t ? make_shade(c_outer[0]) : make_light(c_outer[0]);
-                    if (groove_b || ridge_b) c_outer[2] = groove_b ? make_light(c_outer[2]) : make_shade(c_outer[2]);
-                    draw_band_tb(0, 0, 0, 0, ridge_t||groove_t?half_t:0, taper_r, ridge_b||groove_b?half_b:0, taper_l, c_outer);
-                    // Inner half
-                    lUInt32 c_inner[4] = { sideColors[0], sideColors[1], sideColors[2], sideColors[3] };
-                    if (groove_t || ridge_t) c_inner[0] = groove_t ? make_light(c_inner[0]) : make_shade(c_inner[0]);
-                    if (groove_b || ridge_b) c_inner[2] = groove_b ? make_shade(c_inner[2]) : make_light(c_inner[2]);
-                    draw_band_tb(ridge_t||groove_t?half_t:0, 0, ridge_b||groove_b?half_b:0, 0,
-                                 ridge_t||groove_t?tbw:0, taper_r, ridge_b||groove_b?bbw:0, taper_l, c_inner);
-                }
-                // INSET/OUTSET TB
-                if (side_is_inset[0] || side_is_inset[2] || side_is_outset[0] || side_is_outset[2]) {
-                    lUInt32 c[4] = { sideColors[0], sideColors[1], sideColors[2], sideColors[3] };
-                    // Inset: top shade, bottom light. Outset: opposite.
-                    if (side_is_inset[0] || side_is_outset[0]) c[0] = side_is_inset[0] ? make_shade(c[0]) : make_light(c[0]);
-                    if (side_is_inset[2] || side_is_outset[2]) c[2] = side_is_inset[2] ? make_light(c[2]) : make_shade(c[2]);
-                    int w1t = side_is_inset[0]||side_is_outset[0] ? tbw : 0;
-                    int w1b = side_is_inset[2]||side_is_outset[2] ? bbw : 0;
-                    draw_band_tb(0, 0, 0, 0, w1t, taper_r, w1b, taper_l, c);
                 }
 
                 return; // Rounded handled; skip legacy straight-corner drawing below
