@@ -661,24 +661,69 @@ static void fillRoundedRectRing(LVDrawBuf & drawbuf, int x0, int y0, int x1, int
 // don't apply.
 //
 // Each side is rendered independently as its own shape, joined to its two
-// neighbors along the angular bisector of the corner arc they share -- the
-// same diagonal-miter convention CSS uses for straight corners (a line from
-// the outer corner to the inner corner), generalized to rounded corners by
-// using the bisector angle of the shared elliptical arc instead of a fixed
-// 45-degree line. This replaces the old scanline code's "whichever adjacent
-// side is thicker wins the whole corner outright" rule with an actual miter,
-// so two differently-styled/colored/widthed sides meet the way a browser
-// renders them instead of one side overwriting the other's corner.
+// neighbors along the point where the true 45-degree diagonal from that
+// corner's sharp (unrounded) box-corner point crosses the shared elliptical
+// arc (see cornerDiagonalT) -- the same diagonal-miter convention CSS uses
+// for straight corners (a line from the outer corner to the inner corner),
+// generalized onto the rounded curve. This replaces the old scanline code's
+// "whichever adjacent side is thicker wins the whole corner outright" rule
+// with an actual miter, so two differently-styled/colored/widthed sides meet
+// the way a browser renders them instead of one side overwriting the other's
+// corner.
 // ---------------------------------------------------------------------------
 
 // Corners are numbered 0=TL,1=TR,2=BR,3=BL; each has a fixed angular range
 // (independent of any width) matching the segs[] convention used by the
-// uniform-ring code above, so a corner's bisector is always (t0+t1)/2.
+// uniform-ring code above. The direction of the 45-degree geometric diagonal
+// from each corner's sharp (unrounded) box-corner point into the curve, used
+// by cornerDiagonalT below.
 static const double CR_CORNER_T0[4] = { CRE_PI, -0.5*CRE_PI, 0.0, 0.5*CRE_PI };
 static const double CR_CORNER_T1[4] = { 1.5*CRE_PI, 0.0, 0.5*CRE_PI, CRE_PI };
+static const double CR_CORNER_SIGN_X[4] = { 1.0, -1.0, -1.0, 1.0 };
+static const double CR_CORNER_SIGN_Y[4] = { 1.0, 1.0, -1.0, -1.0 };
 
 static inline void evalEllipsePt(double cx, double cy, double crx, double cry, double t, double &px, double &py) {
     px = cx + crx*cos(t); py = cy + cry*sin(t);
+}
+
+// Parameter angle at which the true 45-degree geometric diagonal from this
+// corner's sharp (unrounded) box-corner point intersects the corner ellipse
+// -- this is where two adjacent differently-styled/colored/widthed sides
+// visually meet in browsers (the same split a square corner's miter line
+// would use, generalized onto the rounded curve).
+//
+// The naive alternative -- bisecting the arc's parameter angle,
+// (t0+t1)/2 -- only coincides with this for a circle (crx==cry). For an
+// eccentric corner it's skewed toward whichever axis has the larger radius:
+// e.g. for rx=16,ry=60 the parameter bisector lands ~17.6px from the sharp
+// corner along each axis, while the true diagonal intersects at ~8px --
+// more than twice as close to the tip. That skew is what made corner seams
+// visibly land in the middle of the left/right sides instead of at the
+// sharp part of the corner for eccentric radii (e.g. border-radius: 10% /
+// 50% on a box roughly twice as wide as it is tall).
+//
+// Derivation: the diagonal is x=sharpX+s*signX, y=sharpY+s*signY for
+// s >= 0. Substituting into the corner's ellipse equation and using
+// cx = sharpX + signX*crx, cy = sharpY + signY*cry (true for every corner,
+// by construction of cornerArcAt) gives, after the signs cancel under
+// squaring, the same quadratic in s regardless of which corner:
+//   ((s-crx)/crx)^2 + ((s-cry)/cry)^2 = 1
+// i.e. s^2*(1/crx^2+1/cry^2) - 2s*(1/crx+1/cry) + 1 = 0. Take the smaller
+// positive root (the nearer intersection, closest to the sharp corner).
+static double cornerDiagonalT(int cornerIdx, double crx, double cry) {
+    double t0 = CR_CORNER_T0[cornerIdx], t1 = CR_CORNER_T1[cornerIdx];
+    if (crx <= 0.0 || cry <= 0.0)
+        return (t0 + t1) * 0.5;
+    double A = 1.0/(crx*crx) + 1.0/(cry*cry);
+    double B = 2.0*(1.0/crx + 1.0/cry);
+    double disc = B*B - 4.0*A; // C == 1
+    if (disc < 0.0) disc = 0.0;
+    double s = (B - sqrt(disc)) / (2.0*A);
+    double signX = CR_CORNER_SIGN_X[cornerIdx], signY = CR_CORNER_SIGN_Y[cornerIdx];
+    double t = atan2(signY*(s/cry - 1.0), signX*(s/crx - 1.0));
+    while (t < t0) t += 2.0*CRE_PI;
+    while (t > t1) t -= 2.0*CRE_PI;
+    return t;
 }
 
 // Corner ellipse (center + radii) at a given horizontal/vertical inset from
@@ -792,9 +837,10 @@ static void crFillOutlineAndBlit(LVDrawBuf &drawbuf, std::vector<FT_Vector> &pts
 // Fills one side's sub-band [w0,w1) (inset from the outer edge along that
 // side's own axis, cumulative -- e.g. groove's outer half passes [0,tbw/2),
 // its inner half [tbw/2,tbw)) as a single filled wedge: the sub-band's outer
-// and inner boundaries, each running from one corner's bisector angle to the
-// other's, closed at each end by a straight miter cut from the outer
-// boundary point to the inner boundary point at that same bisector angle.
+// and inner boundaries, each running from one corner's diagonal split angle
+// (see cornerDiagonalT) to the other's, closed at each end by a straight
+// miter cut from the outer boundary point to the inner boundary point at
+// that same split angle.
 // Passing w0=0, w1=side's full width covers the plain solid-style case.
 static void fillSideWedge(LVDrawBuf &drawbuf, int x0, int y0, int x1, int y1,
                            const int rx[4], const int ry[4],
@@ -815,8 +861,8 @@ static void fillSideWedge(LVDrawBuf &drawbuf, int x0, int y0, int x1, int y1,
     double cxB0, cyB0, rxB0, ryB0; cornerArcAt(cB, x0, y0, x1, y1, rx, ry, whB0, wvB0, cxB0, cyB0, rxB0, ryB0);
     double cxB1, cyB1, rxB1, ryB1; cornerArcAt(cB, x0, y0, x1, y1, rx, ry, whB1, wvB1, cxB1, cyB1, rxB1, ryB1);
 
-    double tA0 = CR_CORNER_T0[cA], tA1 = CR_CORNER_T1[cA], tmA = (tA0 + tA1) * 0.5;
-    double tB0 = CR_CORNER_T0[cB], tB1 = CR_CORNER_T1[cB], tmB = (tB0 + tB1) * 0.5;
+    double tA0 = CR_CORNER_T0[cA], tA1 = CR_CORNER_T1[cA], tmA = cornerDiagonalT(cA, rx[cA], ry[cA]);
+    double tB0 = CR_CORNER_T0[cB], tB1 = CR_CORNER_T1[cB], tmB = cornerDiagonalT(cB, rx[cB], ry[cB]);
     (void)tA0; (void)tB1;
 
     const int pad = 2; // AA slop only -- a wedge never extends past the outer box edge
@@ -870,8 +916,8 @@ static void strokeSideDashedOrDotted(LVDrawBuf &drawbuf, int x0, int y0, int x1,
     double whB, wvB; int cB = sideCornerHV(side, false, half, (double)w_side, tbw, rbw, bbw, lbw, whB, wvB);
     double cxA, cyA, rxA, ryA; cornerArcAt(cA, x0, y0, x1, y1, rx, ry, whA, wvA, cxA, cyA, rxA, ryA);
     double cxB, cyB, rxB, ryB; cornerArcAt(cB, x0, y0, x1, y1, rx, ry, whB, wvB, cxB, cyB, rxB, ryB);
-    double tA0 = CR_CORNER_T0[cA], tA1 = CR_CORNER_T1[cA], tmA = (tA0 + tA1) * 0.5;
-    double tB0 = CR_CORNER_T0[cB], tB1 = CR_CORNER_T1[cB], tmB = (tB0 + tB1) * 0.5;
+    double tA0 = CR_CORNER_T0[cA], tA1 = CR_CORNER_T1[cA], tmA = cornerDiagonalT(cA, rx[cA], ry[cA]);
+    double tB0 = CR_CORNER_T0[cB], tB1 = CR_CORNER_T1[cB], tmB = cornerDiagonalT(cB, rx[cB], ry[cB]);
     (void)tA0; (void)tB1;
 
     double edgeAx, edgeAy; evalEllipsePt(cxA, cyA, rxA, ryA, tA1, edgeAx, edgeAy);
@@ -10468,7 +10514,8 @@ void DrawBorder(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int doc_x,int 
 
                 // Render each side independently as its own filled wedge (or,
                 // for dashed/dotted, its own scoped stroke), joined to its
-                // neighbors along the shared corner's angular bisector -- see
+                // neighbors along the shared corner's true diagonal split
+                // point (see cornerDiagonalT) -- see
                 // fillSideWedge/strokeSideDashedOrDotted above. Unlike the old
                 // LR-then-TB draw-order-dependent dispatch (where whichever
                 // side was thicker simply overwrote the corner), corner
