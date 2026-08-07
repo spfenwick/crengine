@@ -11072,10 +11072,15 @@ void DrawBackgroundImage(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int d
                 for (int i=0;i<4;i++){ saved_rx[i]=dei->rounded_rx[i]; saved_ry[i]=dei->rounded_ry[i]; }
                 css_style_rec_t * style = enode->getStyle().get();
                 if (styleHasBorderRadii(style)) {
-                    // Compute radii for this element only when rounded corners are specified
-                    RenderRectAccessor fmt( enode );
+                    // Compute radii for this element only when rounded corners are specified.
+                    // Use this function's own width/height parameters (which is what
+                    // rounded_clip_rect below is built from) rather than a freshly
+                    // fetched RenderRectAccessor, since call sites (e.g. the <body>
+                    // background) may pass dimensions that differ from the node's own
+                    // box -- using a mismatched box here would size/position the radii
+                    // against the wrong rect.
                     int rx[4]={0,0,0,0}, ry[4]={0,0,0,0};
-                    computeBorderRadiiPx(enode, style, fmt.getWidth(), fmt.getHeight(), rx, ry);
+                    computeBorderRadiiPx(enode, style, width, height, rx, ry);
                     if (rx[0]||rx[1]||rx[2]||rx[3]||ry[0]||ry[1]||ry[2]||ry[3]) {
                         dei->rounded_clip_active = true;
                         dei->rounded_clip_rect = lvRect(x0+doc_x, y0+doc_y, x0+doc_x+width, y0+doc_y+height);
