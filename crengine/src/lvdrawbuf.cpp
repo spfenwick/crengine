@@ -634,6 +634,15 @@ public:
             // Compute per-scanline rounded horizontal mask [xL, xR)
             int xL = clip.left;
             int xR = clip.right;
+            // Intersect with the image's own horizontal extent: the clip rect
+            // (rounded or not) may be wider than the image, and relx below is
+            // only valid within [0, dst_dx).
+            if (xL < dst_x) {
+                xL = dst_x;
+            }
+            if (xR > dst_x + dst_dx) {
+                xR = dst_x + dst_dx;
+            }
             if (use_rounded_clip) {
                 const int y_abs = yy + dst_y;
                 if (y_abs < rounded_clip.top || y_abs >= rounded_clip.bottom) {
