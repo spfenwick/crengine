@@ -16,6 +16,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <vector>
+#include <algorithm>
+#include <ft2build.h>
+#include FT_FREETYPE_H
+#include FT_STROKER_H
+#include FT_OUTLINE_H
 #include "../include/lvtextfm.h"
 #include "../include/lvtinydom.h"
 #include "../include/fb2def.h"
@@ -171,89 +177,61 @@ static void fillRoundedRect(LVDrawBuf & drawbuf, int x0, int y0, int x1, int y1,
     }
 }
 
-// Fill only the border ring between an outer and an inner rounded rectangle.
-// The inner rounded rectangle is defined by shrinking the box by 'w' on all
-// sides, and reducing each corner radius by 'w'. Assumes uniform border width
-// and a solid color.
-static void fillRoundedRectRing(LVDrawBuf & drawbuf, int x0, int y0, int x1, int y1, const int rx[4], const int ry[4], int w, lUInt32 color){
-    if (w <= 0) return;
-    if (!(rx[0]||rx[1]||rx[2]||rx[3]||ry[0]||ry[1]||ry[2]||ry[3])) {
-        // No radii: draw as simple rectangular ring via 4 rects
-        // top
-        drawbuf.FillRect(x0, y0, x1, y0+w, color);
-        // bottom
-        drawbuf.FillRect(x0, y1-w, x1, y1, color);
-        // left
-        drawbuf.FillRect(x0, y0+w, x0+w, y1-w, color);
-        // right
-        drawbuf.FillRect(x1-w, y0+w, x1, y1-w, color);
-        return;
-    }
-    // Inner box, for the flat top/bottom-band vertical range test below
-    int y0i = y0 + w, y1i = y1 - w;
-    if (x0 + w >= x1 - w || y0i >= y1i)
-        return;
-
-    for (int y = y0; y < y1; y++) {
-        // Outer span
-        int xl, xr;
-        computeInnerSpanPerSide(y, x0, y0, x1, y1, rx, ry, 0, 0, 0, 0, xl, xr);
-
-        // Top/bottom bands: fill full width of the ring
-        if (y < y0i || y >= y1i) {
-            if (xl < xr)
-                drawbuf.FillRect(xl, y, xr, y+1, color);
-            continue;
-        }
-
-        // Inner span (middle region), shrunk by w on all sides
-        int xl2, xr2;
-        computeInnerSpanPerSide(y, x0, y0, x1, y1, rx, ry, w, w, w, w, xl2, xr2);
-
-        // Draw left and right border segments of the ring
-        if (xl < xl2)
-            drawbuf.FillRect(xl, y, xl2, y+1, color);
-        if (xr2 < xr)
-            drawbuf.FillRect(xr2, y, xr, y+1, color);
-    }
-}
-
 // Not relying on M_PI: it's a POSIX/glibc math.h extension, not standard C++,
 // and not guaranteed present across all of crengine's cross-compilation targets.
 static const double CRE_PI = 3.14159265358979323846;
 
-// Fill a small circle (used for dotted-style dabs, so dots stay round on both
-// straight edges and curved corners instead of looking like axis-aligned boxes).
-static void fillCircle(LVDrawBuf & drawbuf, double cx, double cy, double r, lUInt32 color) {
-    if (r < 0.5) r = 0.5;
-    int ymin = (int)floor(cy - r);
-    int ymax = (int)ceil(cy + r);
-    for (int y = ymin; y < ymax; y++) {
-        double yy = (y + 0.5) - cy;
-        if (fabs(yy) > r) continue;
-        double dx = sqrt(std::max(0.0, r*r - yy*yy));
-        int xl = (int)floor(cx - dx + 0.5);
-        int xr = (int)floor(cx + dx + 0.5);
-        if (xl < xr)
-            drawbuf.FillRect(xl, y, xr, y+1, color);
-    }
+// ---------------------------------------------------------------------------
+// FreeType-based stroking for dashed/dotted rounded-corner borders.
+//
+// The previous implementation walked the perimeter in ~1px steps and filled
+// the axis-aligned bounding box of each step's rotated quad. That was correct
+// (and cheap) on the straight sides, where the quad is already axis-aligned,
+// but on corner arcs -- or any dash straddling an edge/arc seam -- the
+// bounding box is strictly bigger than the true rotated quad, which is what
+// produced visibly rectangular, non-perpendicular dash ends on curves
+// ("stamped with a rectangular pen" instead of cut perpendicular to the
+// path).
+//
+// FT_Stroker is FreeType's own path-to-outline stroker (also used to stroke
+// glyph outlines): given a path -- built here from the same edge/arc geometry
+// as before, with corner arcs expressed as cubic Beziers -- it produces a
+// correctly capped/joined stroke outline, which FreeType's own scanline
+// rasterizer then turns into an antialiased 8bpp coverage mask. That mask is
+// composited via LVDrawBuf::Draw(x,y,bitmap,w,h,palette), the same call used
+// for every glyph bitmap in the document, so it picks up the same per-bit-
+// depth dithering as text for free, instead of reimplementing it here.
+//
+// All dashes/dots for one ring are accumulated into a single FT_Stroker pass
+// and rasterized/blitted once, rather than once per dash.
+// ---------------------------------------------------------------------------
+
+// Lazily create a dedicated FT_Library for border stroking, independent of
+// LVFreeTypeFontManager's library (private to lvfntman.cpp) since stroking a
+// synthetic rectangle path has nothing to do with font/glyph loading.
+static FT_Library getBorderStrokeFTLibrary() {
+    static FT_Library library = [] {
+        FT_Library lib = NULL;
+        FT_Init_FreeType(&lib);
+        return lib;
+    }();
+    return library;
 }
 
-// One segment of a rounded rect's perimeter: either a straight edge (point(d)
-// is linear in d, inward unit vector constant) or an elliptical corner arc
-// (point(d) looked up via a cumulative arc-length table over t in [t0,t1],
-// inward unit vector is -outward normal, which varies along the arc).
+// One segment of a rounded rect's perimeter: either a straight edge or an
+// elliptical corner arc. Used both to compute the total perimeter length (for
+// dash phasing) and to build the actual FT_Stroker path for each dash/dot.
 struct CRPerimeterSeg {
     bool isArc;
     double len;
     // edge:
-    double ex0, ey0, dux, duy, iux, iuy;
+    double ex0, ey0, dux, duy;
     // arc:
     double cx, cy, crx, cry, t0, t1;
     double cum[65];
 };
 
-static CRPerimeterSeg crMakeEdgeSeg(double ex0, double ey0, double ex1, double ey1, double iux, double iuy) {
+static CRPerimeterSeg crMakeEdgeSeg(double ex0, double ey0, double ex1, double ey1) {
     CRPerimeterSeg sg;
     sg.isArc = false;
     double dx = ex1 - ex0, dy = ey1 - ey0;
@@ -261,14 +239,13 @@ static CRPerimeterSeg crMakeEdgeSeg(double ex0, double ey0, double ex1, double e
     sg.ex0 = ex0; sg.ey0 = ey0;
     sg.dux = sg.len > 0 ? dx / sg.len : 0.0;
     sg.duy = sg.len > 0 ? dy / sg.len : 0.0;
-    sg.iux = iux; sg.iuy = iuy;
     return sg;
 }
 
 // Builds the cumulative arc-length table (64 samples) used to map a local
 // distance along this arc back to an angle t -- there's no closed form for
 // ellipse arc length (it's an elliptic integral), so this polyline is how both
-// the segment's total length and any point on it get computed.
+// the segment's total length and any point/tangent on it get computed.
 static CRPerimeterSeg crMakeArcSeg(double cx, double cy, double crx, double cry, double t0, double t1) {
     CRPerimeterSeg sg;
     sg.isArc = true;
@@ -290,26 +267,137 @@ static CRPerimeterSeg crMakeArcSeg(double cx, double cy, double crx, double cry,
     return sg;
 }
 
+// Maps a local distance within one arc segment back to its parametric angle
+// t, via the cumulative arc-length table (binary search + linear interp
+// between the two bracketing samples). Same lookup the old pointAt() used.
+static double crArcLocalDistanceToT(const CRPerimeterSeg &sg, double local) {
+    if (local < 0) local = 0;
+    if (local > sg.len) local = sg.len;
+    int lo = 0, hi = 64;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (sg.cum[mid] < local) lo = mid + 1; else hi = mid;
+    }
+    int i1 = std::max(1, lo), i0 = i1 - 1;
+    double segStart = sg.cum[i0], segEnd = sg.cum[i1];
+    double frac = (segEnd > segStart) ? (local - segStart) / (segEnd - segStart) : 0.0;
+    return sg.t0 + (sg.t1 - sg.t0) * ((double)i0 + frac) / 64.0;
+}
+
+// Point at local distance `local` within one segment (edge or arc).
+static void crPointOnSeg(const CRPerimeterSeg &sg, double local, double &px, double &py) {
+    if (!sg.isArc) {
+        px = sg.ex0 + sg.dux*local; py = sg.ey0 + sg.duy*local;
+        return;
+    }
+    double t = crArcLocalDistanceToT(sg, local);
+    px = sg.cx + sg.crx*cos(t); py = sg.cy + sg.cry*sin(t);
+}
+
+// Converts a device-space point into an FT 26.6 fixed-point point relative to
+// a bitmap whose top-left device pixel is (originX, originY). FreeType's
+// outline rasterizer uses a bottom-up (y-increases-upward) convention --
+// empirically verified against this FreeType build, since it's undocumented
+// behavior worth pinning down rather than assuming -- so Y is flipped against
+// the bitmap height here; this is the only place that flip happens, every
+// other coordinate in this file stays in normal top-down device space.
+static inline FT_Vector crToFTPoint(double px, double py, double originX, double originY, double bmpH) {
+    FT_Vector v;
+    v.x = (FT_Pos)llround((px - originX) * 64.0);
+    v.y = (FT_Pos)llround((bmpH - (py - originY)) * 64.0);
+    return v;
+}
+
+// Emits, into an already-open FT_Stroker subpath, the path geometry from
+// local distance `local0` to `local1` within a single perimeter segment.
+// Straight edges need only their endpoint (LineTo); arcs are approximated by
+// one cubic Bezier -- accurate to a small fraction of a pixel for sweeps up
+// to 90 degrees, which covers any single corner here -- via the standard
+// control-point-from-tangent construction (control point = endpoint + (4/3
+// tan(sweep/4)) * tangent).
+static void crEmitSegRange(FT_Stroker stroker, const CRPerimeterSeg &sg, double local0, double local1,
+                            double originX, double originY, double bmpH) {
+    if (!sg.isArc) {
+        double ex = sg.ex0 + sg.dux*local1, ey = sg.ey0 + sg.duy*local1;
+        FT_Vector v = crToFTPoint(ex, ey, originX, originY, bmpH);
+        FT_Stroker_LineTo(stroker, &v);
+        return;
+    }
+    double t0 = crArcLocalDistanceToT(sg, local0);
+    double t1 = crArcLocalDistanceToT(sg, local1);
+    double sx = sg.cx + sg.crx*cos(t0), sy = sg.cy + sg.cry*sin(t0);
+    double ex = sg.cx + sg.crx*cos(t1), ey = sg.cy + sg.cry*sin(t1);
+    double k = (4.0/3.0) * tan((t1 - t0) / 4.0);
+    double c1x = sx + k*(-sg.crx*sin(t0)), c1y = sy + k*( sg.cry*cos(t0));
+    double c2x = ex - k*(-sg.crx*sin(t1)), c2y = ey - k*( sg.cry*cos(t1));
+    FT_Vector fc1 = crToFTPoint(c1x, c1y, originX, originY, bmpH);
+    FT_Vector fc2 = crToFTPoint(c2x, c2y, originX, originY, bmpH);
+    FT_Vector fend = crToFTPoint(ex, ey, originX, originY, bmpH);
+    FT_Stroker_CubicTo(stroker, &fc1, &fc2, &fend);
+}
+
+// Adds one dash run [d0, d1] (perimeter distances, d0 <= d1, both within
+// [0, totalLen]) as a single open subpath, so the stroker's butt caps land
+// exactly perpendicular to the true path tangent at the run's ends -- even
+// when the run straddles an edge/arc seam, since one subpath can chain
+// LineTo/CubicTo across several underlying segments, with only a join (set to
+// ROUND on the stroker below) at each internal seam, never a cap.
+static void crEmitDashRun(FT_Stroker stroker, const CRPerimeterSeg segs[8], const double prefix[9],
+                           double d0, double d1, double originX, double originY, double bmpH) {
+    int segIdx0 = 7, segIdx1 = 7;
+    for (int i = 0; i < 8; i++) { if (d0 <= prefix[i+1] || i == 7) { segIdx0 = i; break; } }
+    for (int i = 0; i < 8; i++) { if (d1 <= prefix[i+1] || i == 7) { segIdx1 = i; break; } }
+    double local0 = d0 - prefix[segIdx0];
+
+    double sx, sy;
+    crPointOnSeg(segs[segIdx0], local0, sx, sy);
+    FT_Vector start = crToFTPoint(sx, sy, originX, originY, bmpH);
+    FT_Stroker_BeginSubPath(stroker, &start, 1 /*open*/);
+
+    if (segIdx0 == segIdx1) {
+        crEmitSegRange(stroker, segs[segIdx0], local0, d1 - prefix[segIdx1], originX, originY, bmpH);
+    } else {
+        crEmitSegRange(stroker, segs[segIdx0], local0, segs[segIdx0].len, originX, originY, bmpH);
+        for (int i = segIdx0 + 1; i < segIdx1; i++)
+            crEmitSegRange(stroker, segs[i], 0, segs[i].len, originX, originY, bmpH);
+        crEmitSegRange(stroker, segs[segIdx1], 0, d1 - prefix[segIdx1], originX, originY, bmpH);
+    }
+    FT_Stroker_EndSubPath(stroker);
+}
+
+// Adds one dot as a near-zero-length subpath with round caps, so FT_Stroker's
+// own cap geometry produces the circle (antialiased, "for free") rather than
+// computing one by hand. A *truly* zero-length subpath -- BeginSubPath
+// immediately followed by EndSubPath, or a LineTo back to the exact same
+// point -- crashes FT_Stroker_EndSubPath in this FreeType version (verified:
+// SIGSEGV in ft_stroke_border_close, which indexes border->points[start]
+// assuming at least one point was ever added to the border), so the second
+// point is nudged by 1 unit (1/64px, imperceptible at any real resolution)
+// to keep the subpath non-degenerate while still rendering as a clean circle.
+static void crEmitDot(FT_Stroker stroker, const CRPerimeterSeg segs[8], const double prefix[9],
+                       double mid, double originX, double originY, double bmpH) {
+    int segIdx = 7;
+    for (int i = 0; i < 8; i++) { if (mid <= prefix[i+1] || i == 7) { segIdx = i; break; } }
+    double px, py;
+    crPointOnSeg(segs[segIdx], mid - prefix[segIdx], px, py);
+    FT_Vector p0 = crToFTPoint(px, py, originX, originY, bmpH);
+    FT_Vector p1 = p0;
+    p1.x += 1;
+    FT_Stroker_BeginSubPath(stroker, &p0, 1);
+    FT_Stroker_LineTo(stroker, &p1);
+    FT_Stroker_EndSubPath(stroker);
+}
+
 // Draw a uniform-width dashed or dotted border ring around a rounded rect by
-// walking the *entire* perimeter (4 straight edges + 4 elliptical corner arcs)
-// as one continuous distance coordinate, and phasing the dash pattern off that
-// single coordinate.
+// stroking the whole perimeter as a single path with FT_Stroker, phasing the
+// dash pattern off one continuous arc-length coordinate around all 4 edges +
+// 4 corner arcs.
 //
 // This exists because phasing left/right edges by row (y) and top/bottom edges
 // by column (x) independently -- as fillRoundedRectBorderSidesBand's dashed
 // counterpart does for the general/mixed-style case -- gives each axis its own
 // clock, with no shared origin, so dashes compress/stretch on the curve and
 // don't line up where an edge meets an arc.
-//
-// It's not enough to just track one cumulative arc-length value while visiting
-// the 8 segments in order, either: an earlier version of this function did
-// that but still ran a separate detect-a-run/flush-a-run loop *per segment*,
-// which forces a run boundary at every edge/arc transition regardless of the
-// true dash phase there. A run that actually straddles a seam got cut into two
-// dabs, both pulled unnaturally close to that seam. The fix is for the on/off
-// run detection itself to run once over the whole perimeter, via a single
-// point-lookup that already knows how to cross segment boundaries -- so a run
-// is only ever closed when the dash pattern actually goes off.
 static void fillRoundedRectDashedRing(LVDrawBuf & drawbuf, int x0, int y0, int x1, int y1,
                                        const int rx[4], const int ry[4], int w, bool dotted, lUInt32 color)
 {
@@ -324,18 +412,34 @@ static void fillRoundedRectDashedRing(LVDrawBuf & drawbuf, int x0, int y0, int x
         return p < dash_len;
     };
 
-    // The band of thickness w grows from each edge towards the box interior:
-    // +y for the top edge, -y for the bottom edge, +x for the left edge, -x
-    // for the right edge. Order matches the clockwise walk below.
+    // FT_Stroker draws a stroke *centered* on the path it's given -- half the
+    // width on each side -- unlike the plain-fill ring code below (and the
+    // old AABB-based dashed implementation) which computed the outer edge to
+    // sit exactly on the box boundary and grew the band inward from there.
+    // To keep that same "border sits flush inside the box, not straddling
+    // its edge" behavior, the path handed to the stroker has to be the
+    // *centerline* of the band: the box inset by half the border width, with
+    // each corner radius shrunk by the same half-width (clamped at 0, same
+    // rule computeInnerSpanPerSide uses for the inner span elsewhere).
+    const double half = w / 2.0;
+    double ix0 = x0 + half, iy0 = y0 + half, ix1 = x1 - half, iy1 = y1 - half;
+    if (ix0 > ix1) { ix0 = ix1 = (ix0 + ix1) / 2.0; }
+    if (iy0 > iy1) { iy0 = iy1 = (iy0 + iy1) / 2.0; }
+    double irx[4], iry[4];
+    for (int i = 0; i < 4; i++) {
+        irx[i] = std::max(0.0, rx[i] - half);
+        iry[i] = std::max(0.0, ry[i] - half);
+    }
+
     CRPerimeterSeg segs[8] = {
-        crMakeEdgeSeg(x0 + rx[0], y0, x1 - rx[1], y0, 0.0, +1.0),                    // top
-        crMakeArcSeg(x1 - rx[1], y0 + ry[1], rx[1], ry[1], -CRE_PI/2.0, 0.0),        // TR
-        crMakeEdgeSeg(x1, y0 + ry[1], x1, y1 - ry[2], -1.0, 0.0),                    // right
-        crMakeArcSeg(x1 - rx[2], y1 - ry[2], rx[2], ry[2], 0.0, CRE_PI/2.0),         // BR
-        crMakeEdgeSeg(x1 - rx[2], y1, x0 + rx[3], y1, 0.0, -1.0),                    // bottom
-        crMakeArcSeg(x0 + rx[3], y1 - ry[3], rx[3], ry[3], CRE_PI/2.0, CRE_PI),      // BL
-        crMakeEdgeSeg(x0, y1 - ry[3], x0, y0 + ry[0], +1.0, 0.0),                    // left
-        crMakeArcSeg(x0 + rx[0], y0 + ry[0], rx[0], ry[0], CRE_PI, 3.0*CRE_PI/2.0),  // TL
+        crMakeEdgeSeg(ix0 + irx[0], iy0, ix1 - irx[1], iy0),                                // top
+        crMakeArcSeg(ix1 - irx[1], iy0 + iry[1], irx[1], iry[1], -CRE_PI/2.0, 0.0),          // TR
+        crMakeEdgeSeg(ix1, iy0 + iry[1], ix1, iy1 - iry[2]),                                // right
+        crMakeArcSeg(ix1 - irx[2], iy1 - iry[2], irx[2], iry[2], 0.0, CRE_PI/2.0),           // BR
+        crMakeEdgeSeg(ix1 - irx[2], iy1, ix0 + irx[3], iy1),                                // bottom
+        crMakeArcSeg(ix0 + irx[3], iy1 - iry[3], irx[3], iry[3], CRE_PI/2.0, CRE_PI),        // BL
+        crMakeEdgeSeg(ix0, iy1 - iry[3], ix0, iy0 + iry[0]),                                // left
+        crMakeArcSeg(ix0 + irx[0], iy0 + iry[0], irx[0], iry[0], CRE_PI, 3.0*CRE_PI/2.0),    // TL
     };
     double prefix[9] = {0.0};
     for (int i = 0; i < 8; i++) prefix[i+1] = prefix[i] + segs[i].len;
@@ -343,76 +447,11 @@ static void fillRoundedRectDashedRing(LVDrawBuf & drawbuf, int x0, int y0, int x
     if (totalLen <= 0.0)
         return;
 
-    // Point + inward unit vector at absolute perimeter distance d (wrapped into
-    // [0, totalLen)). This is what lets a dash run be sampled correctly even
-    // when it straddles two segments -- the lookup itself crosses the seam.
-    auto pointAt = [&](double d, double &px, double &py, double &iux, double &iuy) {
-        double dd = fmod(d, totalLen);
-        if (dd < 0) dd += totalLen;
-        int segIdx = 7;
-        for (int i = 0; i < 8; i++) {
-            if (dd <= prefix[i+1] || i == 7) { segIdx = i; break; }
-        }
-        double local = dd - prefix[segIdx];
-        const CRPerimeterSeg &sg = segs[segIdx];
-        if (local < 0) local = 0;
-        if (local > sg.len) local = sg.len;
-        if (!sg.isArc) {
-            px = sg.ex0 + sg.dux*local; py = sg.ey0 + sg.duy*local;
-            iux = sg.iux; iuy = sg.iuy;
-            return;
-        }
-        int lo = 0, hi = 64;
-        while (lo < hi) {
-            int mid = (lo + hi) / 2;
-            if (sg.cum[mid] < local) lo = mid + 1; else hi = mid;
-        }
-        int i1 = std::max(1, lo), i0 = i1 - 1;
-        double segStart = sg.cum[i0], segEnd = sg.cum[i1];
-        double frac = (segEnd > segStart) ? (local - segStart) / (segEnd - segStart) : 0.0;
-        double tt = sg.t0 + (sg.t1 - sg.t0) * ((double)i0 + frac) / 64.0;
-        px = sg.cx + sg.crx*cos(tt); py = sg.cy + sg.cry*sin(tt);
-        double nx = cos(tt)/sg.crx, ny = sin(tt)/sg.cry;
-        double nlen = sqrt(nx*nx + ny*ny);
-        if (nlen > 0) { nx /= nlen; ny /= nlen; }
-        iux = -nx; iuy = -ny; // inward = -outward normal
-    };
-
-    // Flush one dash-on run [distStart, distEnd) (both are perimeter distances).
-    // Dotted: one round dab at the run's true midpoint, via pointAt, so it's
-    // correctly placed even when the midpoint falls in a different segment
-    // than where the run started. Dashed: a sequence of ~1px-of-arc-length
-    // strips from the outer boundary inward by w, each sampled via pointAt so
-    // the strip follows the perimeter regardless of whether the run sits on an
-    // edge, an arc, or straddles both.
-    auto flushRun = [&](double distStart, double distEnd) {
-        if (dotted) {
-            double mid = (distStart + distEnd) * 0.5;
-            double px, py, iux, iuy;
-            pointAt(mid, px, py, iux, iuy);
-            fillCircle(drawbuf, px + iux*w*0.5, py + iuy*w*0.5, w/2.0, color);
-            return;
-        }
-        double d = distStart;
-        double ppx, ppy, piux, piuy;
-        pointAt(d, ppx, ppy, piux, piuy);
-        while (d < distEnd) {
-            double dn = std::min(distEnd, d + 1.0);
-            double npx, npy, niux, niuy;
-            pointAt(dn, npx, npy, niux, niuy);
-            double ix0 = ppx + piux*w, iy0 = ppy + piuy*w;
-            double ix1 = npx + niux*w, iy1 = npy + niuy*w;
-            int minx = (int)floor(std::min(std::min(ppx, npx), std::min(ix0, ix1)));
-            int maxx = (int)ceil (std::max(std::max(ppx, npx), std::max(ix0, ix1)));
-            int miny = (int)floor(std::min(std::min(ppy, npy), std::min(iy0, iy1)));
-            int maxy = (int)ceil (std::max(std::max(ppy, npy), std::max(iy0, iy1)));
-            drawbuf.FillRect(minx, miny, maxx, maxy, color);
-            d = dn; ppx = npx; ppy = npy; piux = niux; piuy = niuy;
-        }
-    };
-
-    // Single pass over the whole perimeter, ~1 device pixel of arc length per
-    // step, so a run is only closed when the dash pattern truly goes off.
+    // Collect on-runs first (same detection loop the old implementation used):
+    // all of them get stroked in a single FT_Stroker pass below, producing one
+    // outline / one bitmap / one blit for the whole ring instead of one per dash.
+    struct CRRun { double d0, d1; };
+    std::vector<CRRun> runs;
     const int totalSteps = std::max(1, (int)llround(totalLen));
     int runStart = -1;
     for (int i = 0; i <= totalSteps; i++) {
@@ -420,10 +459,196 @@ static void fillRoundedRectDashedRing(LVDrawBuf & drawbuf, int x0, int y0, int x
         if (on && runStart < 0) {
             runStart = i;
         } else if (!on && runStart >= 0) {
-            flushRun((double)runStart, (double)i);
+            runs.push_back({(double)runStart, (double)i});
             runStart = -1;
         }
     }
+    if (runs.empty())
+        return;
+
+    FT_Library library = getBorderStrokeFTLibrary();
+    if (!library)
+        return;
+
+    FT_Stroker stroker;
+    if (FT_Stroker_New(library, &stroker))
+        return;
+    FT_Stroker_Set(stroker, (FT_Fixed)llround(w * 0.5 * 64.0),
+                   dotted ? FT_STROKER_LINECAP_ROUND : FT_STROKER_LINECAP_BUTT,
+                   FT_STROKER_LINEJOIN_ROUND, 0);
+
+    // Bitmap covers the ring's outer box, padded by half the stroke width (a
+    // dash/dot can extend that far past the nominal boundary) plus a couple
+    // of pixels of AA/rounding slop.
+    const int pad = w/2 + 2;
+    const int originX = x0 - pad, originY = y0 - pad;
+    const int bmpW = (x1 - x0) + 2*pad;
+    const int bmpH = (y1 - y0) + 2*pad;
+    if (bmpW <= 0 || bmpH <= 0) {
+        FT_Stroker_Done(stroker);
+        return;
+    }
+
+    for (const CRRun &r : runs) {
+        if (dotted)
+            crEmitDot(stroker, segs, prefix, (r.d0 + r.d1) * 0.5, originX, originY, (double)bmpH);
+        else
+            crEmitDashRun(stroker, segs, prefix, r.d0, r.d1, originX, originY, (double)bmpH);
+    }
+
+    FT_UInt numPoints = 0, numContours = 0;
+    FT_Stroker_GetCounts(stroker, &numPoints, &numContours);
+    if (numPoints == 0 || numContours == 0) {
+        FT_Stroker_Done(stroker);
+        return;
+    }
+
+    FT_Outline outline;
+    if (FT_Outline_New(library, numPoints, numContours, &outline)) {
+        FT_Stroker_Done(stroker);
+        return;
+    }
+    outline.n_points = 0;
+    outline.n_contours = 0;
+    FT_Stroker_Export(stroker, &outline);
+    FT_Stroker_Done(stroker);
+
+    std::vector<lUInt8> bmpBuf((size_t)bmpW * (size_t)bmpH, 0);
+    FT_Bitmap bmp;
+    memset(&bmp, 0, sizeof(bmp));
+    bmp.width = bmpW; bmp.rows = bmpH; bmp.pitch = bmpW;
+    bmp.buffer = bmpBuf.data(); bmp.pixel_mode = FT_PIXEL_MODE_GRAY; bmp.num_grays = 256;
+    FT_Outline_Get_Bitmap(library, &outline, &bmp);
+    FT_Outline_Done(library, &outline);
+
+    // Composite the AA coverage mask through the same call used for every
+    // glyph bitmap in the document, so it picks up the same per-bit-depth
+    // dithering as text -- but bypass the glyph-specific "hide if more than
+    // half clipped at a page edge" behavior (LVDrawBuf::Draw's
+    // _hidePartialGlyphs), which is correct for avoiding ugly half-cut
+    // letters at a page break but would make a border vanish outright if a
+    // bordered box's edge happens to land past the fold; the old
+    // FillRect-based border code never had that failure mode.
+    lUInt32 prevColor = drawbuf.GetTextColor();
+    bool prevHide = drawbuf.getHidePartialGlyphs();
+    drawbuf.SetTextColor(color);
+    drawbuf.setHidePartialGlyphs(false);
+    drawbuf.Draw(originX, originY, bmpBuf.data(), bmpW, bmpH, NULL);
+    drawbuf.setHidePartialGlyphs(prevHide);
+    drawbuf.SetTextColor(prevColor);
+}
+
+// Fill only the border ring between an outer and an inner rounded rectangle,
+// via a single closed FT_Stroker path -- the solid-color counterpart of
+// fillRoundedRectDashedRing above, antialiased for the same reason: FT's own
+// rasterizer produces the coverage mask instead of a hard-edged scanline
+// fill. A closed subpath needs no run detection and no cap handling (a loop
+// has no start/end to cap -- verified empirically that FT_Stroker closes it
+// correctly from geometry alone, with no explicit "line back to the start"
+// needed), so this is simpler than the dashed case: one FT_Stroker pass
+// around the whole centerline perimeter.
+static void fillRoundedRectRing(LVDrawBuf & drawbuf, int x0, int y0, int x1, int y1,
+                                 const int rx[4], const int ry[4], int w, lUInt32 color)
+{
+    if (w <= 0)
+        return;
+
+    // Same centerline construction as fillRoundedRectDashedRing: the stroke
+    // is centered on the given path, so the path itself must be the box
+    // inset by half the border width (radii shrunk to match) for the ring to
+    // sit flush inside the box rather than straddling its edge.
+    const double half = w / 2.0;
+    double ix0 = x0 + half, iy0 = y0 + half, ix1 = x1 - half, iy1 = y1 - half;
+    if (ix0 > ix1) { ix0 = ix1 = (ix0 + ix1) / 2.0; }
+    if (iy0 > iy1) { iy0 = iy1 = (iy0 + iy1) / 2.0; }
+    double irx[4], iry[4];
+    for (int i = 0; i < 4; i++) {
+        irx[i] = std::max(0.0, rx[i] - half);
+        iry[i] = std::max(0.0, ry[i] - half);
+    }
+
+    CRPerimeterSeg segs[8] = {
+        crMakeEdgeSeg(ix0 + irx[0], iy0, ix1 - irx[1], iy0),
+        crMakeArcSeg(ix1 - irx[1], iy0 + iry[1], irx[1], iry[1], -CRE_PI/2.0, 0.0),
+        crMakeEdgeSeg(ix1, iy0 + iry[1], ix1, iy1 - iry[2]),
+        crMakeArcSeg(ix1 - irx[2], iy1 - iry[2], irx[2], iry[2], 0.0, CRE_PI/2.0),
+        crMakeEdgeSeg(ix1 - irx[2], iy1, ix0 + irx[3], iy1),
+        crMakeArcSeg(ix0 + irx[3], iy1 - iry[3], irx[3], iry[3], CRE_PI/2.0, CRE_PI),
+        crMakeEdgeSeg(ix0, iy1 - iry[3], ix0, iy0 + iry[0]),
+        crMakeArcSeg(ix0 + irx[0], iy0 + iry[0], irx[0], iry[0], CRE_PI, 3.0*CRE_PI/2.0),
+    };
+    double totalLen = 0.0;
+    for (int i = 0; i < 8; i++) totalLen += segs[i].len;
+    if (totalLen <= 0.0)
+        return;
+
+    FT_Library library = getBorderStrokeFTLibrary();
+    if (!library)
+        return;
+
+    FT_Stroker stroker;
+    if (FT_Stroker_New(library, &stroker))
+        return;
+    // Cap style is irrelevant for a closed subpath (a loop has no ends to
+    // cap). MITER join keeps square (zero-radius) corners crisp; any actual
+    // corner arc is already C1-continuous with its adjoining edges (an edge
+    // and the arc it meets share a tangent by construction), so the join
+    // there is never visibly sharp regardless of join style. Miter limit 4
+    // matches the common SVG/CSS default and comfortably covers the ~1.41x
+    // miter length a true 90-degree square corner produces.
+    FT_Stroker_Set(stroker, (FT_Fixed)llround(w * 0.5 * 64.0),
+                   FT_STROKER_LINECAP_BUTT, FT_STROKER_LINEJOIN_MITER,
+                   (FT_Fixed)(4 * 65536));
+
+    const int pad = w/2 + 2;
+    const int originX = x0 - pad, originY = y0 - pad;
+    const int bmpW = (x1 - x0) + 2*pad;
+    const int bmpH = (y1 - y0) + 2*pad;
+    if (bmpW <= 0 || bmpH <= 0) {
+        FT_Stroker_Done(stroker);
+        return;
+    }
+
+    double sx, sy;
+    crPointOnSeg(segs[0], 0.0, sx, sy);
+    FT_Vector start = crToFTPoint(sx, sy, originX, originY, (double)bmpH);
+    FT_Stroker_BeginSubPath(stroker, &start, 0 /*closed*/);
+    for (int i = 0; i < 8; i++)
+        crEmitSegRange(stroker, segs[i], 0.0, segs[i].len, originX, originY, (double)bmpH);
+    FT_Stroker_EndSubPath(stroker);
+
+    FT_UInt numPoints = 0, numContours = 0;
+    FT_Stroker_GetCounts(stroker, &numPoints, &numContours);
+    if (numPoints == 0 || numContours == 0) {
+        FT_Stroker_Done(stroker);
+        return;
+    }
+
+    FT_Outline outline;
+    if (FT_Outline_New(library, numPoints, numContours, &outline)) {
+        FT_Stroker_Done(stroker);
+        return;
+    }
+    outline.n_points = 0;
+    outline.n_contours = 0;
+    FT_Stroker_Export(stroker, &outline);
+    FT_Stroker_Done(stroker);
+
+    std::vector<lUInt8> bmpBuf((size_t)bmpW * (size_t)bmpH, 0);
+    FT_Bitmap bmp;
+    memset(&bmp, 0, sizeof(bmp));
+    bmp.width = bmpW; bmp.rows = bmpH; bmp.pitch = bmpW;
+    bmp.buffer = bmpBuf.data(); bmp.pixel_mode = FT_PIXEL_MODE_GRAY; bmp.num_grays = 256;
+    FT_Outline_Get_Bitmap(library, &outline, &bmp);
+    FT_Outline_Done(library, &outline);
+
+    lUInt32 prevColor = drawbuf.GetTextColor();
+    bool prevHide = drawbuf.getHidePartialGlyphs();
+    drawbuf.SetTextColor(color);
+    drawbuf.setHidePartialGlyphs(false);
+    drawbuf.Draw(originX, originY, bmpBuf.data(), bmpW, bmpH, NULL);
+    drawbuf.setHidePartialGlyphs(prevHide);
+    drawbuf.SetTextColor(prevColor);
 }
 
 // Draw only a band of the rounded border: for each side, draw the region between
