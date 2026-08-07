@@ -10000,6 +10000,15 @@ void DrawBorder(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int doc_x,int 
             int rx[4]={0,0,0,0}, ry[4]={0,0,0,0};
             computeBorderRadiiPx(enode, style.get(), fmt.getWidth(), fmt.getHeight(), rx, ry);
             if (rx[0]||rx[1]||rx[2]||rx[3]||ry[0]||ry[1]||ry[2]||ry[3]) {
+                // Apply night-mode/color-inversion the same way the legacy
+                // straight-corner path below does, since this rounded path
+                // returns before ever reaching that code.
+                if (invert_colors) {
+                    topBordercolor = invertNonGrayscaleColor(topBordercolor);
+                    rightBordercolor = invertNonGrayscaleColor(rightBordercolor);
+                    bottomBordercolor = invertNonGrayscaleColor(bottomBordercolor);
+                    leftBordercolor = invertNonGrayscaleColor(leftBordercolor);
+                }
                 int X0 = x0 + doc_x;
                 int Y0 = y0 + doc_y;
                 int X1 = X0 + fmt.getWidth();
