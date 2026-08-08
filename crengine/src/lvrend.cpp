@@ -5826,6 +5826,14 @@ void copystyle( css_style_ref_t source, css_style_ref_t dest )
     dest->border_color[1]=source->border_color[1];
     dest->border_color[2]=source->border_color[2];
     dest->border_color[3]=source->border_color[3];
+    dest->border_radius_h[0]=source->border_radius_h[0];
+    dest->border_radius_h[1]=source->border_radius_h[1];
+    dest->border_radius_h[2]=source->border_radius_h[2];
+    dest->border_radius_h[3]=source->border_radius_h[3];
+    dest->border_radius_v[0]=source->border_radius_v[0];
+    dest->border_radius_v[1]=source->border_radius_v[1];
+    dest->border_radius_v[2]=source->border_radius_v[2];
+    dest->border_radius_v[3]=source->border_radius_v[3];
     dest->background_image=source->background_image;
     dest->background_repeat=source->background_repeat;
     dest->background_position=source->background_position;
