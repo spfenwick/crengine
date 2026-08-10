@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "../include/lvdrawbuf.h"
+#include "../include/lvrend.h" // for draw_extra_info_t
 
 #define GUARD_BYTE 0xa5
 #define CHECK_GUARD_BYTE \
@@ -605,24 +606,63 @@ public:
 //        }
         lvRect clip;
         dst->GetClipRect( &clip );
+        // Optional rounded per-scanline clipping (for background images honoring border-radius)
+        lvRect rounded_clip;
+        int rrx[4] = {0,0,0,0};
+        int rry[4] = {0,0,0,0};
+        bool use_rounded_clip = false;
+        draw_extra_info_t *dei = (draw_extra_info_t*)dst->GetDrawExtraInfo();
+        if (dei) {
+            if (dei->rounded_clip_active) {
+                rounded_clip = dei->rounded_clip_rect;
+                for (int i=0;i<4;i++){ rrx[i]=dei->rounded_rx[i]; rry[i]=dei->rounded_ry[i]; }
+                use_rounded_clip = true;
+            }
+        }
         for ( ;yy<yy2; yy++ )
         {
             if ( yy+dst_y<clip.top || yy+dst_y>=clip.bottom )
                 continue;
+            // Compute per-scanline rounded horizontal mask [xL, xR)
+            int xL = clip.left;
+            int xR = clip.right;
+            // Intersect with the image's own horizontal extent: the clip rect
+            // (rounded or not) may be wider than the image, and relx below is
+            // only valid within [0, dst_dx).
+            if (xL < dst_x) {
+                xL = dst_x;
+            }
+            if (xR > dst_x + dst_dx) {
+                xR = dst_x + dst_dx;
+            }
+            if (use_rounded_clip) {
+                const int y_abs = yy + dst_y;
+                if (y_abs < rounded_clip.top || y_abs >= rounded_clip.bottom) {
+                    continue; // outside rounded vertical range
+                }
+                int xl, xr;
+                computeInnerSpanPerSide(y_abs, rounded_clip.left, rounded_clip.top,
+                                         rounded_clip.right, rounded_clip.bottom,
+                                         rrx, rry, 0, 0, 0, 0, xl, xr);
+                // Merge with regular clip
+                if (xl > xL) {
+                    xL = xl;
+                }
+                if (xr < xR) {
+                    xR = xr;
+                }
+                if (!(xL < xR)) continue;
+            }
             const int bpp = dst->GetBitsPerPixel();
             if ( bpp >= 24 )
             {
                 lUInt32 * __restrict row = (lUInt32 *)dst->GetScanLine( yy + dst_y );
-                row += dst_x;
-                for (int x=0; x<dst_dx; x++)
+                row += xL;
+                int ix = 0;
+                for (int x=xL; x<xR; x++, ix++)
                 {
-                    const int xx = x + dst_x;
-                    if ( xx<clip.left || xx>=clip.right ) {
-                        // OOB, don't plot it!
-                        continue;
-                    }
-
-                    const lUInt32 cl = data[xmap ? xmap[x] : x];
+                    const int relx = x - dst_x;
+                    const lUInt32 cl = data[xmap ? xmap[relx] : relx];
                     const lUInt8 alpha = (cl >> 24)&0xFF;
                     // NOTE: Remember that for some mysterious reason, lvimg feeds us inverted alpha
                     //       (i.e., 0 is opaque, 0xFF is transparent)...
@@ -632,22 +672,22 @@ public:
                             // ...unless we're doing night-mode shenanigans, in which case, we need to fake an inverted background
                             // (i.e., a *black* background, so it gets inverted back to white with NightMode, since white is our expected "standard" background color)
                             // c.f., https://github.com/koreader/koreader/issues/4986
-                            row[ x ] = 0x00000000;
+                            row[ ix ] = 0x00000000;
                         } else {
                             continue;
                         }
                     } else if ( alpha == 0 ) {
                         // Fully opaque, plot it as-is
-                        row[ x ] = cl ^ rgba_invert;
+                        row[ ix ] = cl ^ rgba_invert;
                     } else {
-                        if ((row[x] & 0xFF000000) == 0xFF000000) {
+                        if ((row[ix] & 0xFF000000) == 0xFF000000) {
                             // Plot it as-is if *buffer* pixel is transparent
-                            row[ x ] = cl ^ rgba_invert;
+                            row[ ix ] = cl ^ rgba_invert;
                         } else {
                             // NOTE: This *also* has a "fully opaque" shortcut... :/
-                            ApplyAlphaRGB( row[x], cl, alpha );
+                            ApplyAlphaRGB( row[ix], cl, alpha );
                             // Invert post-blending to avoid potential stupidity...
-                            row[ x ] ^= rgba_invert;
+                            row[ ix ] ^= rgba_invert;
                         }
                     }
                 }
@@ -655,16 +695,12 @@ public:
             else if ( bpp == 16 )
             {
                 lUInt16 * __restrict row = (lUInt16 *)dst->GetScanLine( yy + dst_y );
-                row += dst_x;
-                for (int x=0; x<dst_dx; x++)
+                row += xL;
+                int ix = 0;
+                for (int x=xL; x<xR; x++, ix++)
                 {
-                    const int xx = x + dst_x;
-                    if ( xx<clip.left || xx>=clip.right ) {
-                        // OOB, don't plot it!
-                        continue;
-                    }
-
-                    const lUInt32 cl = data[xmap ? xmap[x] : x];
+                    const int relx = x - dst_x;
+                    const lUInt32 cl = data[xmap ? xmap[relx] : relx];
                     const lUInt8 alpha = (cl >> 24)&0xFF;
                     // NOTE: See final branch of the ladder. Not quite sure why some alpha ranges are treated differently...
                     if ( alpha >= 0xF0 ) {
@@ -673,32 +709,28 @@ public:
                             // ...unless we're doing night-mode shenanigans, in which case, we need to fake an inverted background
                             // (i.e., a *black* background, so it gets inverted back to white with NightMode, since white is our expected "standard" background color)
                             // c.f., https://github.com/koreader/koreader/issues/4986
-                            row[ x ] = 0x0000;
+                            row[ ix ] = 0x0000;
                         } else {
                             continue;
                         }
                     } else if ( alpha < 16 ) {
-                        row[ x ] = rgb888to565( cl ^ rgba_invert );
+                        row[ ix ] = rgb888to565( cl ^ rgba_invert );
                     } else if ( alpha < 0xF0 ) {
-                        lUInt32 v = rgb565to888(row[x]);
+                        lUInt32 v = rgb565to888(row[ix]);
                         ApplyAlphaRGB( v, cl, alpha );
-                        row[ x ] = rgb888to565(v ^ rgba_invert);
+                        row[ ix ] = rgb888to565(v ^ rgba_invert);
                     }
                 }
             }
             else if ( bpp > 2 ) // 3,4,8 bpp
             {
                 lUInt8 * __restrict row = (lUInt8 *)dst->GetScanLine( yy + dst_y );
-                row += dst_x;
-                for (int x=0; x<dst_dx; x++)
+                row += xL;
+                int ix = 0;
+                for (int x=xL; x<xR; x++, ix++)
                 {
-                    const int xx = x + dst_x;
-                    if ( xx<clip.left || xx>=clip.right ) {
-                        // OOB, don't plot it!
-                        continue;
-                    }
-
-                    const int srcx = xmap ? xmap[x] : x;
+                    const int relx = x - dst_x;
+                    const int srcx = xmap ? xmap[relx] : relx;
                     lUInt32 cl = data[srcx];
                     const lUInt8 alpha = (cl >> 24)&0xFF;
                     if ( alpha == 0xFF ) {
@@ -710,7 +742,7 @@ public:
                             continue;
                         }
                     } else if ( alpha != 0 ) {
-                        lUInt8 origLuma = row[x];
+                        lUInt8 origLuma = row[ix];
                         // Expand lower bitdepths to Y8
                         if ( bpp == 3 ) {
                             origLuma = origLuma & 0xE0;
@@ -738,7 +770,7 @@ public:
                     } else {
                         dcl = rgbToGray( cl, bpp );
                     }
-                    row[ x ] = dcl ^ gray_invert;
+                    row[ ix ] = dcl ^ gray_invert;
                     // ApplyAlphaGray( row[x], dcl, alpha, bpp );
                 }
             }
@@ -746,20 +778,12 @@ public:
             {
                 //fprintf( stderr, "." );
                 lUInt8 * __restrict row = (lUInt8 *)dst->GetScanLine( yy+dst_y );
-                //row += dst_x;
-                for (int x=0; x<dst_dx; x++)
+                for (int x=xL; x<xR; x++)
                 {
-                    const int xx = x + dst_x;
-                    if ( xx<clip.left || xx>=clip.right ) {
-                        // OOB, don't plot it!
-                        continue;
-                    }
-
-                    const int byteindex = (xx >> 2);
-                    const int bitindex = (3-(xx & 3))<<1;
+                    const int byteindex = (x >> 2);
+                    const int bitindex = (3-(x & 3))<<1;
                     const lUInt8 mask = 0xC0 >> (6 - bitindex);
-
-                    lUInt32 cl = data[xmap ? xmap[x] : x];
+                    lUInt32 cl = data[xmap ? xmap[x - dst_x] : x - dst_x];
                     const lUInt8 alpha = (cl >> 24)&0xFF;
                     if ( alpha == 0xFF ) {
                         // Transparent, don't plot it...
@@ -796,16 +820,9 @@ public:
             {
                 //fprintf( stderr, "." );
                 lUInt8 * __restrict row = (lUInt8 *)dst->GetScanLine( yy+dst_y );
-                //row += dst_x;
-                for (int x=0; x<dst_dx; x++)
+                for (int x=xL; x<xR; x++)
                 {
-                    const int xx = x + dst_x;
-                    if ( xx<clip.left || xx>=clip.right ) {
-                        // OOB, don't plot it!
-                        continue;
-                    }
-
-                    lUInt32 cl = data[xmap ? xmap[x] : x];
+                    lUInt32 cl = data[xmap ? xmap[x - dst_x] : x - dst_x];
                     const lUInt8 alpha = (cl >> 24)&0xFF;
                     if ( alpha & 0x80 ) {
                         // Transparent, don't plot it...
@@ -827,11 +844,11 @@ public:
                     } else {
                         dcl = rgbToGrayMask( cl ^ rgba_invert, 1 ) & 1;
                     }
-                    const int byteindex = (xx >> 3);
-                    const int bitindex = ((xx & 7));
-                    const lUInt8 mask = 0x80 >> (bitindex);
-                    dcl = dcl << (7-bitindex);
-                    row[ byteindex ] = (lUInt8)((row[ byteindex ] & (~mask)) | dcl);
+                    const int byteindex = (x >> 3);
+                    const int bit = 7 - (x & 7);
+                    const lUInt8 mask = (lUInt8)(0x01 << bit);
+                    const lUInt8 dclbit = dcl ? mask : 0x00;
+                    row[ byteindex ] = (lUInt8)((row[ byteindex ] & (~mask)) | dclbit);
                 }
             }
             else

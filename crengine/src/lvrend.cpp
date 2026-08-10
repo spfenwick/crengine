@@ -9511,7 +9511,9 @@ static inline int roundedCornerInsetDx(int rxc, int ryc, double dy) {
 // Compute the horizontal span [xl2, xr2) at scanline y for a rounded rectangle
 // (defined by corner radii rx[4]/ry[4], TL/TR/BR/BL) inset per-side by
 // w_top/w_right/w_bottom/w_left (pass all zero for the outer/unshrunk span).
-static void computeInnerSpanPerSide(int y,
+// Declared in lvrend.h; shared with lvdrawbuf.cpp's per-scanline rounded clip
+// mask so the elliptical-corner math has a single implementation.
+void computeInnerSpanPerSide(int y,
                               int x0, int y0, int x1, int y1,
                               const int rx[4], const int ry[4],
                               int w_top, int w_right, int w_bottom, int w_left,
@@ -11265,8 +11267,45 @@ void DrawBackgroundImage(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int d
                     target_clip.bottom = orig_clip.bottom;
                 drawbuf.SetClipRect( &target_clip );
             }
-            // Draw
+            // Draw (optionally with rounded clipping, honoring border-radius)
+            // Compute border radii and, if any, enable rounded clip via draw_extra_info
+            draw_extra_info_t * dei = (draw_extra_info_t*)drawbuf.GetDrawExtraInfo();
+            bool restore_rounded = false;
+            lvRect saved_rounded_rect;
+            int saved_rx[4] = {0,0,0,0};
+            int saved_ry[4] = {0,0,0,0};
+            bool saved_active = false;
+            if (dei) {
+                // Save prev state
+                saved_active = dei->rounded_clip_active;
+                saved_rounded_rect = dei->rounded_clip_rect;
+                for (int i=0;i<4;i++){ saved_rx[i]=dei->rounded_rx[i]; saved_ry[i]=dei->rounded_ry[i]; }
+                css_style_rec_t * bg_style = enode->getStyle().get();
+                if (styleHasBorderRadii(bg_style)) {
+                    // Compute radii for this element only when rounded corners are specified.
+                    // Use this function's own width/height parameters (which is what
+                    // rounded_clip_rect below is built from) rather than a freshly
+                    // fetched RenderRectAccessor, since call sites (e.g. the <body>
+                    // background) may pass dimensions that differ from the node's own
+                    // box -- using a mismatched box here would size/position the radii
+                    // against the wrong rect.
+                    int rx[4]={0,0,0,0}, ry[4]={0,0,0,0};
+                    computeBorderRadiiPx(enode, bg_style, width, height, rx, ry);
+                    if (rx[0]||rx[1]||rx[2]||rx[3]||ry[0]||ry[1]||ry[2]||ry[3]) {
+                        dei->rounded_clip_active = true;
+                        dei->rounded_clip_rect = lvRect(x0+doc_x, y0+doc_y, x0+doc_x+width, y0+doc_y+height);
+                        for (int i=0;i<4;i++){ dei->rounded_rx[i]=rx[i]; dei->rounded_ry[i]=ry[i]; }
+                        restore_rounded = true;
+                    }
+                }
+            }
             drawbuf.Draw(transformed, x0+doc_x+draw_x, y0+doc_y+draw_y, transform_w, transform_h);
+            if (restore_rounded) {
+                // Restore original rounded state
+                dei->rounded_clip_active = saved_active;
+                dei->rounded_clip_rect = saved_rounded_rect;
+                for (int i=0;i<4;i++){ dei->rounded_rx[i]=saved_rx[i]; dei->rounded_ry[i]=saved_ry[i]; }
+            }
             if (clip_to_target) {
                 drawbuf.SetClipRect( &orig_clip ); // Restore the original one
             }
