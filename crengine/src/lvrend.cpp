@@ -9443,12 +9443,12 @@ static bool styleHasAnyBorder(const css_style_rec_t * style) {
 }
 
 // Whether every *present* border side is one of the styles DrawBorder()'s
-// general rounded-corner path covers -- solid, inset, outset, double,
-// groove, or ridge (any mix of these six is fine) -- rather than falling
-// back to the legacy square-corner code for a dashed/dotted side that didn't
-// already match the uniform fast-ring path. Used by the background-fill
-// code (which has no border-drawing context of its own) to decide whether
-// its fill must be rounded to match.
+// general rounded-corner path covers -- solid, inset, outset, dashed,
+// dotted, double, groove, or ridge (any mix of these eight is fine, since
+// that path handles dashed/dotted sides individually via their own
+// perimeter-arc walk regardless of what the other sides are). Used by the
+// background-fill code (which has no border-drawing context of its own) to
+// decide whether its fill must be rounded to match.
 static bool styleHasOnlyRoundableBorders(const css_style_rec_t * style) {
     for (int i=0; i<4; i++) {
         css_border_style_type_t bs = i==0 ? style->border_style_top : i==1 ? style->border_style_right :
@@ -9459,6 +9459,7 @@ static bool styleHasOnlyRoundableBorders(const css_style_rec_t * style) {
         lUInt32 color = style->border_color[i].type != css_val_unspecified ? style->border_color[i].value : style->color.value;
         has = has && !IS_COLOR_FULLY_TRANSPARENT(color);
         if (has && bs != css_border_solid && bs != css_border_inset && bs != css_border_outset &&
+                    bs != css_border_dashed && bs != css_border_dotted &&
                     bs != css_border_double && bs != css_border_groove && bs != css_border_ridge)
             return false;
     }
@@ -9921,10 +9922,13 @@ static inline bool crCenterlineHasArc(const CRRoundRectCenterline &g, int i) {
     return g.rxc[i] > 0.0 && g.ryc[i] > 0.0;
 }
 
-// Walk a closed loop of perimeter segments (the uniform-ring fast path: all 4
-// edges + 4 arcs) and paint a dash/dot pattern along it, phased continuously
-// off one distance coordinate from the start of the sequence.
-static void walkAndDashSegments(LVDrawBuf & drawbuf, const CRPerimeterSeg segs[], int segCount,
+// Walk a sequence of perimeter segments -- either a closed loop (wrap=true:
+// the uniform-ring fast path, all 4 edges + 4 arcs) or an open chain (wrap=
+// false: a single side's own edge plus whichever of its two corner arcs it
+// owns, for the general per-side path below) -- and paint a dash/dot pattern
+// along it, phased continuously off one distance coordinate from the start of
+// the sequence.
+static void walkAndDashSegments(LVDrawBuf & drawbuf, const CRPerimeterSeg segs[], int segCount, bool wrap,
                                  int w, bool dotted, lUInt32 color)
 {
     if (w <= 0 || segCount <= 0)
@@ -9938,22 +9942,34 @@ static void walkAndDashSegments(LVDrawBuf & drawbuf, const CRPerimeterSeg segs[]
         return p < dash_len;
     };
 
-    double prefix[9] = {0.0}; // segCount is at most 8 (closed ring)
+    double prefix[9] = {0.0}; // segCount is at most 8 (closed ring) or 3 (open chain)
     for (int i = 0; i < segCount; i++) prefix[i+1] = prefix[i] + segs[i].len;
     const double totalLen = prefix[segCount];
     if (totalLen <= 0.0)
         return;
 
-    // Point + inward unit vector at distance d along the sequence, wrapped into
-    // [0, totalLen). This is what lets a dash run be sampled correctly even
-    // when it straddles two segments -- the lookup itself crosses the seam.
+    // Point + inward unit vector at distance d along the sequence: wrapped into
+    // [0, totalLen) for a closed loop, clamped to it for an open chain (d is
+    // never asked for outside that range anyway, since the walk below only
+    // steps from 0 to totalLen). This is what lets a dash run be sampled
+    // correctly even when it straddles two segments -- the lookup itself
+    // crosses the seam.
     auto pointAt = [&](double d, double &px, double &py, double &iux, double &iuy) {
-        double dd = fmod(d, totalLen);
-        if (dd < 0) dd += totalLen;
+        double dd;
+        if (wrap) {
+            dd = fmod(d, totalLen);
+            if (dd < 0) dd += totalLen;
+        } else {
+            dd = d < 0 ? 0 : (d > totalLen ? totalLen : d);
+        }
         // Zero-radius corners produce a zero-length arc segment (crx==0 or
         // cry==0 below would otherwise divide-by-zero in the normal-vector
         // calc). Skip degenerate (zero-length) segments here so such a corner
-        // is never actually walked.
+        // is never actually walked -- a distance that lands exactly on one
+        // (e.g. d==0 at the start of an open chain beginning with a
+        // zero-radius corner arc) resolves to the nearest real edge/arc
+        // instead, carrying the phase straight from the end of one straight
+        // edge into the start of the next.
         int segIdx = segCount - 1;
         for (int i = 0; i < segCount; i++) {
             if (segs[i].len <= 0.0)
@@ -10069,7 +10085,7 @@ static void fillRoundedRectDashedRing(LVDrawBuf & drawbuf, int x0, int y0, int x
     segs[segCount++] = crMakeEdgeSeg(g.ex0, g.cy[3], g.ex0, g.cy[0], +1.0, 0.0);                    // left
     if (crCenterlineHasArc(g, 0))
         segs[segCount++] = crMakeArcSeg(g.cx[0], g.cy[0], g.rxc[0], g.ryc[0], CRE_PI, 3.0*CRE_PI/2.0); // TL
-    walkAndDashSegments(drawbuf, segs, segCount, w, dotted, color);
+    walkAndDashSegments(drawbuf, segs, segCount, true, w, dotted, color);
 }
 
 // Whether the style's border, as DrawBorder() would render it, qualifies for
@@ -10165,11 +10181,12 @@ void DrawBorder(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int doc_x,int 
         int tbw=topBorderwidth,rbw=rightBorderwidth,bbw=bottomBorderwidth,lbw=leftBorderwidth;
 
         // Rounded border paths, tried in order, each drawing the whole ring
-        // and returning. Any style/mix these don't cover -- a present side
-        // that's dashed/dotted mixed with other styles or disagreeing on
-        // width/color with another dashed/dotted side -- falls back to the
-        // existing square-corner rendering below, even if the style also
-        // specifies a border-radius.
+        // and returning: a uniform single-color solid ring, a uniform
+        // dashed/dotted ring, then the general per-side path (any mix of
+        // solid/inset/outset/dashed/dotted/double/groove/ridge). Every
+        // border style is covered by one of these once a radius is present,
+        // so the legacy square-corner rendering below is only reached when
+        // there's no border-radius at all, or no border to draw.
         if (styleHasBorderRadii(style.get())) {
             int rx[4]={0,0,0,0}, ry[4]={0,0,0,0};
             computeBorderRadiiPx(enode, style.get(), fmt.getWidth(), fmt.getHeight(), rx, ry);
@@ -10201,16 +10218,12 @@ void DrawBorder(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int doc_x,int 
                     return;
                 }
 
-                // General per-side rounded rendering for the styles we
-                // support so far: SOLID/INSET/OUTSET (mitered per-side, one
-                // ring) and DOUBLE/GROOVE/RIDGE (each its own two independent
-                // rings). Any mix of these six is fine, with independent
-                // colors/widths per side. A present side that's
-                // DASHED/DOTTED and didn't already match the uniform
-                // fast-ring path above isn't covered by rounded rendering
-                // yet, so the whole box falls back to the legacy
-                // square-corner code below instead of painting some sides
-                // rounded and silently skipping that one.
+                // General per-side rounded rendering: any mix, with
+                // independent colors/widths per side, of SOLID/INSET/OUTSET
+                // (mitered per-side, one ring), DASHED/DOTTED (each side's
+                // own edge plus whichever of its two corner arcs it owns,
+                // walked below), and DOUBLE/GROOVE/RIDGE (each its own two
+                // independent rings) -- every border style is covered.
                 bool side_is_solid[4] = {
                     hastopBorder && style->border_style_top == css_border_solid,
                     hasrightBorder && style->border_style_right == css_border_solid,
@@ -10226,6 +10239,16 @@ void DrawBorder(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int doc_x,int 
                     hasrightBorder && style->border_style_right == css_border_outset,
                     hasbottomBorder && style->border_style_bottom == css_border_outset,
                     hasleftBorder && style->border_style_left == css_border_outset};
+                bool side_is_dashed[4] = {
+                    hastopBorder && style->border_style_top == css_border_dashed,
+                    hasrightBorder && style->border_style_right == css_border_dashed,
+                    hasbottomBorder && style->border_style_bottom == css_border_dashed,
+                    hasleftBorder && style->border_style_left == css_border_dashed};
+                bool side_is_dotted[4] = {
+                    hastopBorder && style->border_style_top == css_border_dotted,
+                    hasrightBorder && style->border_style_right == css_border_dotted,
+                    hasbottomBorder && style->border_style_bottom == css_border_dotted,
+                    hasleftBorder && style->border_style_left == css_border_dotted};
                 bool side_is_double[4] = {
                     hastopBorder && style->border_style_top == css_border_double,
                     hasrightBorder && style->border_style_right == css_border_double,
@@ -10241,11 +10264,15 @@ void DrawBorder(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int doc_x,int 
                     hasrightBorder && style->border_style_right == css_border_ridge,
                     hasbottomBorder && style->border_style_bottom == css_border_ridge,
                     hasleftBorder && style->border_style_left == css_border_ridge};
+                // Always true: every border style value is one of the eight
+                // checked above (plus absent), so this branch is unconditional
+                // -- kept as an explicit check for clarity and as a guard in
+                // case a style value is ever added without updating this list.
                 bool side_coverable[4] = {
-                    !hastopBorder || side_is_solid[0] || side_is_inset[0] || side_is_outset[0] || side_is_double[0] || side_is_groove[0] || side_is_ridge[0],
-                    !hasrightBorder || side_is_solid[1] || side_is_inset[1] || side_is_outset[1] || side_is_double[1] || side_is_groove[1] || side_is_ridge[1],
-                    !hasbottomBorder || side_is_solid[2] || side_is_inset[2] || side_is_outset[2] || side_is_double[2] || side_is_groove[2] || side_is_ridge[2],
-                    !hasleftBorder || side_is_solid[3] || side_is_inset[3] || side_is_outset[3] || side_is_double[3] || side_is_groove[3] || side_is_ridge[3]};
+                    !hastopBorder || side_is_solid[0] || side_is_inset[0] || side_is_outset[0] || side_is_dashed[0] || side_is_dotted[0] || side_is_double[0] || side_is_groove[0] || side_is_ridge[0],
+                    !hasrightBorder || side_is_solid[1] || side_is_inset[1] || side_is_outset[1] || side_is_dashed[1] || side_is_dotted[1] || side_is_double[1] || side_is_groove[1] || side_is_ridge[1],
+                    !hasbottomBorder || side_is_solid[2] || side_is_inset[2] || side_is_outset[2] || side_is_dashed[2] || side_is_dotted[2] || side_is_double[2] || side_is_groove[2] || side_is_ridge[2],
+                    !hasleftBorder || side_is_solid[3] || side_is_inset[3] || side_is_outset[3] || side_is_dashed[3] || side_is_dotted[3] || side_is_double[3] || side_is_groove[3] || side_is_ridge[3]};
                 if (side_coverable[0] && side_coverable[1] && side_coverable[2] && side_coverable[3]) {
                     // Helpers for shading. Firefox uses fixed near-black
                     // shade/light values when the border color is real black
@@ -10308,6 +10335,126 @@ void DrawBorder(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int doc_x,int 
                         int mw[4] = {hastopBorder ? tbw : 0, hasrightBorder ? rbw : 0, hasbottomBorder ? bbw : 0, hasleftBorder ? lbw : 0};
                         fillRoundedRectBorder(drawbuf, X0, Y0, X1, Y1, rx, ry,
                                                   mw[0], draw[0], mw[1], draw[1], mw[2], draw[2], mw[3], draw[3], c);
+                    }
+
+                    // DASHED/DOTTED, any side: walk each dashed/dotted side's own edge
+                    // plus whichever of its two corner arcs it owns, via
+                    // walkAndDashSegments, the same continuous-perimeter-distance
+                    // approach fillRoundedRectDashedRing uses for the uniform case,
+                    // instead of phasing by row/column per side (which put a visible
+                    // seam right where each edge met its corner arc). When a corner is
+                    // shared by two active sides (any styles, not just dashed/dotted
+                    // ones), the arc is split at its 45-degree bisector, one half to each
+                    // side -- the dashed/dotted side's own chain gets its half via
+                    // walkAndDashSegments below, and the non-dashed neighbor's own ring
+                    // fill already curves into its own half via the dashed side's true
+                    // (miter-only) width -- see fillRoundedRectBorder's w_*/mw_* split.
+                    // Only when a dashed/dotted side has *no* neighbor at that corner
+                    // (the neighbor's border is absent entirely) does it keep the whole
+                    // arc, since nothing else will paint any of it.
+                    if (side_is_dashed[0] || side_is_dotted[0] || side_is_dashed[1] || side_is_dotted[1] ||
+                        side_is_dashed[2] || side_is_dotted[2] || side_is_dashed[3] || side_is_dotted[3]) {
+                        bool top_dashed = side_is_dashed[0] || side_is_dotted[0];
+                        bool right_dashed = side_is_dashed[1] || side_is_dotted[1];
+                        bool bottom_dashed = side_is_dashed[2] || side_is_dotted[2];
+                        bool left_dashed = side_is_dashed[3] || side_is_dotted[3];
+
+                        // Each arc's t0..t1 range starts adjacent to its counter-clockwise
+                        // neighbor and ends adjacent to its clockwise neighbor (see the
+                        // clockwise segment order in fillRoundedRectDashedRing); tmid is the
+                        // 45-degree bisector where a mitered corner's seam belongs.
+                        const double tTL0 = CRE_PI, tTL1 = 3.0 * CRE_PI / 2.0, tTLm = (tTL0 + tTL1) / 2.0; // TL: left..top
+                        const double tTR0 = -CRE_PI / 2.0, tTR1 = 0.0, tTRm = (tTR0 + tTR1) / 2.0;         // TR: top..right
+                        const double tBR0 = 0.0, tBR1 = CRE_PI / 2.0, tBRm = (tBR0 + tBR1) / 2.0;          // BR: right..bottom
+                        const double tBL0 = CRE_PI / 2.0, tBL1 = CRE_PI, tBLm = (tBL0 + tBL1) / 2.0;       // BL: bottom..left
+
+                        bool splitTL = hasleftBorder && hastopBorder;
+                        bool splitTR = hastopBorder && hasrightBorder;
+                        bool splitBR = hasrightBorder && hasbottomBorder;
+                        bool splitBL = hasbottomBorder && hasleftBorder;
+
+                        bool topOwnsTL = top_dashed && (splitTL || !hasleftBorder);
+                        bool topOwnsTR = top_dashed && (splitTR || !hasrightBorder);
+                        bool rightOwnsTR = right_dashed && (splitTR || !hastopBorder);
+                        bool rightOwnsBR = right_dashed && (splitBR || !hasbottomBorder);
+                        bool bottomOwnsBR = bottom_dashed && (splitBR || !hasrightBorder);
+                        bool bottomOwnsBL = bottom_dashed && (splitBL || !hasleftBorder);
+                        bool leftOwnsBL = left_dashed && (splitBL || !hasbottomBorder);
+                        bool leftOwnsTL = left_dashed && (splitTL || !hastopBorder);
+
+                        // Each side's edge, plus whichever corner arc(s) it owns, is walked
+                        // along *its own* centerline -- computeRoundRectCenterline as if the
+                        // whole ring shared that side's width -- rather than the outer box.
+                        // A corner an active side owns alone (no bordered neighbor there)
+                        // then centerlines exactly like the uniform-ring case above; a split
+                        // corner instead gets two independently-computed centerline arcs
+                        // meeting only approximately at the 45-degree seam when the two
+                        // sides' widths differ, same tradeoff the solid mitered border
+                        // already makes at that seam.
+                        CRRoundRectCenterline gT = computeRoundRectCenterline(X0, Y0, X1, Y1, rx, ry, tbw);
+                        CRRoundRectCenterline gR = computeRoundRectCenterline(X0, Y0, X1, Y1, rx, ry, rbw);
+                        CRRoundRectCenterline gB = computeRoundRectCenterline(X0, Y0, X1, Y1, rx, ry, bbw);
+                        CRRoundRectCenterline gL = computeRoundRectCenterline(X0, Y0, X1, Y1, rx, ry, lbw);
+
+                        CRPerimeterSeg segTL_left = crMakeArcSeg(gL.cx[0], gL.cy[0], gL.rxc[0], gL.ryc[0], tTL0, splitTL ? tTLm : tTL1);
+                        CRPerimeterSeg segTL_top = crMakeArcSeg(gT.cx[0], gT.cy[0], gT.rxc[0], gT.ryc[0], splitTL ? tTLm : tTL0, tTL1);
+                        CRPerimeterSeg segTR_top = crMakeArcSeg(gT.cx[1], gT.cy[1], gT.rxc[1], gT.ryc[1], tTR0, splitTR ? tTRm : tTR1);
+                        CRPerimeterSeg segTR_right = crMakeArcSeg(gR.cx[1], gR.cy[1], gR.rxc[1], gR.ryc[1], splitTR ? tTRm : tTR0, tTR1);
+                        CRPerimeterSeg segBR_right = crMakeArcSeg(gR.cx[2], gR.cy[2], gR.rxc[2], gR.ryc[2], tBR0, splitBR ? tBRm : tBR1);
+                        CRPerimeterSeg segBR_bottom = crMakeArcSeg(gB.cx[2], gB.cy[2], gB.rxc[2], gB.ryc[2], splitBR ? tBRm : tBR0, tBR1);
+                        CRPerimeterSeg segBL_bottom = crMakeArcSeg(gB.cx[3], gB.cy[3], gB.rxc[3], gB.ryc[3], tBL0, splitBL ? tBLm : tBL1);
+                        CRPerimeterSeg segBL_left = crMakeArcSeg(gL.cx[3], gL.cy[3], gL.rxc[3], gL.ryc[3], splitBL ? tBLm : tBL0, tBL1);
+
+                        CRPerimeterSeg segTop = crMakeEdgeSeg(gT.cx[0], gT.ey0, gT.cx[1], gT.ey0, 0.0, +1.0);
+                        CRPerimeterSeg segRight = crMakeEdgeSeg(gR.ex1, gR.cy[1], gR.ex1, gR.cy[2], -1.0, 0.0);
+                        CRPerimeterSeg segBottom = crMakeEdgeSeg(gB.cx[2], gB.ey1, gB.cx[3], gB.ey1, 0.0, -1.0);
+                        CRPerimeterSeg segLeft = crMakeEdgeSeg(gL.ex0, gL.cy[3], gL.ex0, gL.cy[0], +1.0, 0.0);
+
+                        // A side only adds its owned corner arc to its chain when that
+                        // corner's centerline radius is actually non-degenerate (see
+                        // crCenterlineHasArc) -- a collapsed-to-a-point corner needs no
+                        // segment at all, since the edge either side of it already meets
+                        // exactly there.
+                        if (top_dashed) {
+                            CRPerimeterSeg chain[3];
+                            int n = 0;
+                            if (topOwnsTL && crCenterlineHasArc(gT, 0))
+                                chain[n++] = segTL_top;
+                            chain[n++] = segTop;
+                            if (topOwnsTR && crCenterlineHasArc(gT, 1))
+                                chain[n++] = segTR_top;
+                            walkAndDashSegments(drawbuf, chain, n, false, tbw, side_is_dotted[0], sideColors[0]);
+                        }
+                        if (right_dashed) {
+                            CRPerimeterSeg chain[3];
+                            int n = 0;
+                            if (rightOwnsTR && crCenterlineHasArc(gR, 1))
+                                chain[n++] = segTR_right;
+                            chain[n++] = segRight;
+                            if (rightOwnsBR && crCenterlineHasArc(gR, 2))
+                                chain[n++] = segBR_right;
+                            walkAndDashSegments(drawbuf, chain, n, false, rbw, side_is_dotted[1], sideColors[1]);
+                        }
+                        if (bottom_dashed) {
+                            CRPerimeterSeg chain[3];
+                            int n = 0;
+                            if (bottomOwnsBR && crCenterlineHasArc(gB, 2))
+                                chain[n++] = segBR_bottom;
+                            chain[n++] = segBottom;
+                            if (bottomOwnsBL && crCenterlineHasArc(gB, 3))
+                                chain[n++] = segBL_bottom;
+                            walkAndDashSegments(drawbuf, chain, n, false, bbw, side_is_dotted[2], sideColors[2]);
+                        }
+                        if (left_dashed) {
+                            CRPerimeterSeg chain[3];
+                            int n = 0;
+                            if (leftOwnsBL && crCenterlineHasArc(gL, 3))
+                                chain[n++] = segBL_left;
+                            chain[n++] = segLeft;
+                            if (leftOwnsTL && crCenterlineHasArc(gL, 0))
+                                chain[n++] = segTL_left;
+                            walkAndDashSegments(drawbuf, chain, n, false, lbw, side_is_dotted[3], sideColors[3]);
+                        }
                     }
 
                     // DOUBLE: two fully independent lines -- the outer one drawn as its
@@ -11420,15 +11567,14 @@ void DrawDocument( LVDrawBuf & drawbuf, ldomNode * enode, int x0, int y0, int dx
                     if ( draw_bg_color ) {
                         // Round the background fill to match border-radius when the box has
                         // no border, or when it has one that DrawBorder() will itself paint
-                        // as a rounded ring: the single-color solid fast path, the
+                        // as a rounded ring: the single-color solid fast path, the uniform
                         // dashed/dotted fast path, or the general path (every present side
-                        // solid/inset/outset/double/groove/ridge, colors/widths may differ
-                        // per side). Any other border (a present side that's dashed/dotted
-                        // mixed with other styles or disagreeing on width/color) is still
-                        // drawn square by DrawBorder(), so rounding the fill underneath it
-                        // would leave a square-cornered border with mismatched round
-                        // background peeking out: such boxes fall back to the existing
-                        // square rendering.
+                        // solid/inset/outset/dashed/dotted/double/groove/ridge -- any mix,
+                        // colors/widths may differ per side). Every border style is covered
+                        // by one of these once a radius is present, so this effectively
+                        // always rounds whenever there's a border at all; the explicit
+                        // checks are kept so this stays in lockstep with DrawBorder() rather
+                        // than assuming that coverage.
                         int rx[4]={0,0,0,0}, ry[4]={0,0,0,0};
                         if ( styleHasBorderRadii(style.get()) ) {
                             bool no_border = !styleHasAnyBorder(style.get());
