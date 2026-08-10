@@ -22038,8 +22038,15 @@ LVStreamRef ldomDocument::getObjectImageStream( lString32 refName )
         if ( data.startsWith(lString32("data:image/svg+xml")) ) {
             int pos = data.pos(U',');
             if ( pos > 0 ) {
-                // The attribute value has already been url-decoded at parsing time
-                lString8 plaindata = UnicodeToUtf8(refName.substr(pos+1));
+                // The payload may or may not be percent-encoded (eg. a CSS
+                // background-image: url(...) is left as-is by the stylesheet
+                // parser, while some other caller might already have decoded
+                // it) - DecodeHTMLUrlString() is a no-op when there is nothing
+                // to decode, so it's safe to apply unconditionally here rather
+                // than leaving it to a caller's "retry if unrecognized" logic,
+                // which can't work: an unrecognized format falls back to a
+                // dummy placeholder image instead of a null stream/source.
+                lString8 plaindata = UnicodeToUtf8(DecodeHTMLUrlString(refName.substr(pos+1)));
                 ref = LVCreateStringStream(plaindata);
                 return ref;
             }

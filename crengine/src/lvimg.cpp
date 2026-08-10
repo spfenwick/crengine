@@ -2101,8 +2101,9 @@ static bool lunasvgDrawImageHelper(lunasvg::external_context_t * xcontext, const
             if ( data.startsWith(lString32("data:image/svg+xml")) ) {
                 int pos = data.pos(U',');
                 if ( pos > 0 ) {
-                    // The attribute value has already been url-decoded at parsing time
-                    lString8 plaindata = UnicodeToUtf8(refName.substr(pos+1));
+                    // The payload may or may not be percent-encoded; see the
+                    // matching comment in ldomDocument::getObjectImageStream().
+                    lString8 plaindata = UnicodeToUtf8(DecodeHTMLUrlString(refName.substr(pos+1)));
                     ref = LVCreateStringStream(plaindata);
                 }
             }
@@ -2417,6 +2418,13 @@ protected:
 	int _split_y;
 	LVArray<lUInt32> _line;
 	LVImageDecoderCallback * _callback;
+	// True when _src can render itself directly at our exact target size (eg. an
+	// SVG source) and we're doing a plain fill-the-whole-area stretch on both axes
+	// (not a 9-patch split or a tile, which need a fixed-size source to split/repeat).
+	// In that case there's no native-resolution raster to pixel-remap at all: we tell
+	// _src our target size via GetTargetSize() below, and OnLineDecoded() just passes
+	// its (already correctly-sized) lines straight through instead of remapping them.
+	bool _srcIsScalableStretch;
 public:
     LVStretchImgSource( LVImageSourceRef src, int newWidth, int newHeight, ImageTransform hTransform, ImageTransform vTransform, int splitX, int splitY )
 		: _src( src )
@@ -2428,6 +2436,7 @@ public:
         , _vTransform(vTransform)
 		, _split_x( splitX )
 		, _split_y( splitY )
+		, _srcIsScalableStretch( src->IsScalable() && hTransform == IMG_TRANSFORM_STRETCH && vTransform == IMG_TRANSFORM_STRETCH )
 	{
         if ( _hTransform == IMG_TRANSFORM_TILE )
             if ( _split_x>=_src_dx )
@@ -2451,6 +2460,17 @@ public:
 		_line.clear();
         _callback->OnEndDecode(this, res);
     }
+    // LVImageDecoderCallback: called by _src->Decode(this) below to ask us (as
+    // its callback) what size it should render itself at. Only meaningful when
+    // _srcIsScalableStretch, in which case it's our own fixed target size --
+    // see the member comment above.
+    virtual bool GetTargetSize(int & width, int & height) const {
+        if ( !_srcIsScalableStretch )
+            return false;
+        width = _dst_dx;
+        height = _dst_dy;
+        return true;
+    }
 	virtual ldomDocument * GetSourceDocument() { return _src.isNull() ? NULL : _src->GetSourceDocument(); }
 	virtual ldomNode * GetSourceNode() { return _src.isNull() ? NULL : _src->GetSourceNode(); }
 	virtual LVStream * GetSourceStream() { return NULL; }
@@ -2469,6 +2489,13 @@ public:
 
 bool LVStretchImgSource::OnLineDecoded( LVImageSource * obj, int y, lUInt32 * __restrict data )
 {
+    if ( _srcIsScalableStretch ) {
+        // _src was told (via our GetTargetSize() above) to render itself directly
+        // at _dst_dx x _dst_dy, so this line is already exactly what we want:
+        // no pixel remapping needed, just forward it as-is.
+        return _callback->OnLineDecoded( obj, y, data );
+    }
+
     bool res = false;
 
     switch ( _hTransform ) {
