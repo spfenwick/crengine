@@ -9537,6 +9537,90 @@ static void fillRoundedRect(LVDrawBuf & drawbuf, int x0, int y0, int x1, int y1,
     }
 }
 
+// Fast path for a single-color rounded border ring, each side independently
+// shrunk by its own width (0 to skip a side). Used when all four sides share
+// one color, so the whole ring can be painted in one pass with no per-side
+// color bookkeeping.
+static void fillRoundedRectBorderFast(LVDrawBuf & drawbuf, int x0, int y0, int x1, int y1, const int rx[4], const int ry[4],
+                                 int w_top, int w_right, int w_bottom, int w_left, lUInt32 color){
+    // Nothing to draw if every side is width-0.
+    if (w_top <= 0 && w_right <= 0 && w_bottom <= 0 && w_left <= 0) return;
+    // Interior (hole) box's vertical extent, for the flat top/bottom-band
+    // row-range test below.
+    int y0i = y0 + w_top, y1i = y1 - w_bottom;
+    // Degenerate box: the border is wide enough to close off the interior
+    // hole entirely on one axis or the other -- bail rather than draw.
+    if (x0 + w_left >= x1 - w_right || y0i >= y1i)
+        return;
+
+    for (int y = y0; y < y1; y++) {
+        // This row's outer (unshrunk) span -- the box's own outline at y, radii included.
+        int xl, xr;
+        computeInnerSpanPerSide(y, x0, y0, x1, y1, rx, ry, 0, 0, 0, 0, xl, xr);
+
+        // Top/bottom bands: fill full width of the box.
+        if (y < y0i || y >= y1i) {
+            if (xl < xr)
+                drawbuf.FillRect(xl, y, xr, y+1, color);
+            continue;
+        }
+
+        // Middle rows: this row's inner (interior-hole) span, each side shrunk by its own width.
+        int xlInterior, xrInterior;
+        computeInnerSpanPerSide(y, x0, y0, x1, y1, rx, ry, w_top, w_right, w_bottom, w_left, xlInterior, xrInterior);
+
+        // Left sliver: outer edge up to where the interior hole begins.
+        if (xl < xlInterior)
+            drawbuf.FillRect(xl, y, xlInterior, y+1, color);
+        // Right sliver: where the interior hole ends up to the outer edge.
+        if (xrInterior < xr)
+            drawbuf.FillRect(xrInterior, y, xr, y+1, color);
+    }
+}
+
+// Whether the style's border, as DrawBorder() would render it, qualifies for
+// the fillRoundedRectBorderFast() single-pass ring: every *present* side is
+// solid and shares one (opaque) colour with every other present side; a side
+// can also be entirely absent (no width/style/colour needed for it). Widths
+// may differ per side, since fillRoundedRectBorderFast() already shrinks
+// each side by its own width (0 for an absent side skips it).
+static bool styleQualifiesForFastRoundedBorder(ldomNode * node, const css_style_rec_t * style,
+                                                int &w_top, int &w_right, int &w_bottom, int &w_left,
+                                                lUInt32 &ring_color) {
+    bool has[4];
+    lUInt32 color[4];
+    bool have_color = false;
+    lUInt32 common_color = 0;
+    for (int i=0; i<4; i++) {
+        css_border_style_type_t bs = i==0 ? style->border_style_top : i==1 ? style->border_style_right :
+                                      i==2 ? style->border_style_bottom : style->border_style_left;
+        has[i] = bs >= css_border_solid;
+        css_length_t bw = style->border_width[i];
+        has[i] = has[i] && !(bw.value == 0 && bw.type > css_val_unspecified);
+        color[i] = style->border_color[i].type != css_val_unspecified ? style->border_color[i].value : style->color.value;
+        has[i] = has[i] && !IS_COLOR_FULLY_TRANSPARENT(color[i]);
+        if (!has[i])
+            continue; // absent side: no style/width/colour constraint
+        if (bs != css_border_solid)
+            return false; // present but non-solid: not a fast-path candidate
+        if (!have_color) { common_color = color[i]; have_color = true; }
+        else if (color[i] != common_color)
+            return false; // present sides disagree on colour
+    }
+    if (!have_color)
+        return false; // no side actually present (caller shouldn't ask us in that case)
+    int width = 0; // values in % are invalid for borders, so we shouldn't get any
+    int w[4];
+    for (int i=0; i<4; i++) {
+        if (!has[i]) { w[i] = 0; continue; }
+        w[i] = lengthToPx(node, style->border_width[i], width);
+        w[i] = w[i] != 0 ? w[i] : DEFAULT_BORDER_WIDTH;
+    }
+    w_top = w[0]; w_right = w[1]; w_bottom = w[2]; w_left = w[3];
+    ring_color = common_color;
+    return true;
+}
+
 //draw border lines,support color,width,all styles, not support border-collapse
 void DrawBorder(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int doc_x,int doc_y,RenderRectAccessor fmt)
 {
@@ -9582,6 +9666,31 @@ void DrawBorder(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int doc_x,int 
         int leftBorderwidth = lengthToPx(enode, style->border_width[3],width);
         leftBorderwidth = leftBorderwidth!=0 ? leftBorderwidth : DEFAULT_BORDER_WIDTH;
         int tbw=topBorderwidth,rbw=rightBorderwidth,bbw=bottomBorderwidth,lbw=leftBorderwidth;
+
+        // Rounded border fast path: every present side is solid and shares
+        // one color (widths may differ per side, and a side may be entirely
+        // absent). Any other border style/mix (dashed, dotted, double,
+        // groove, ridge, inset, outset, or present sides disagreeing on
+        // color) falls back to the existing square-corner rendering below,
+        // even if the style also specifies a border-radius.
+        if (styleHasBorderRadii(style.get())) {
+            int w_top, w_right, w_bottom, w_left; lUInt32 ring_color;
+            if (styleQualifiesForFastRoundedBorder(enode, style.get(), w_top, w_right, w_bottom, w_left, ring_color)) {
+                int rx[4]={0,0,0,0}, ry[4]={0,0,0,0};
+                computeBorderRadiiPx(enode, style.get(), fmt.getWidth(), fmt.getHeight(), rx, ry);
+                if (rx[0]||rx[1]||rx[2]||rx[3]||ry[0]||ry[1]||ry[2]||ry[3]) {
+                    if (invert_colors)
+                        ring_color = invertNonGrayscaleColor(ring_color);
+                    int X0 = x0 + doc_x;
+                    int Y0 = y0 + doc_y;
+                    int X1 = X0 + fmt.getWidth();
+                    int Y1 = Y0 + fmt.getHeight();
+                    fillRoundedRectBorderFast(drawbuf, X0, Y0, X1, Y1, rx, ry, w_top, w_right, w_bottom, w_left, ring_color);
+                    return;
+                }
+            }
+        }
+
         if (hastopBorder) {
             int dot=1,interval=0;//default style
             topBorderwidth=tbw;
@@ -10538,16 +10647,23 @@ void DrawDocument( LVDrawBuf & drawbuf, ldomNode * enode, int x0, int y0, int dx
                 else {
                     // Regular element: draw bgcolor or image inside its border box
                     if ( draw_bg_color ) {
-                        // Round the background fill to match border-radius, but only when
-                        // the box has no border: a border is still drawn square by
-                        // DrawBorder(), so rounding the fill underneath it would leave
+                        // Round the background fill to match border-radius when the box has
+                        // no border, or when it has one that DrawBorder() will itself paint
+                        // as a rounded ring (the single-color solid fast path: every present
+                        // side solid and the same color, widths may differ per side, and a
+                        // side may be entirely absent). Any other border (mixed styles, or
+                        // present sides disagreeing on color) is still drawn square by
+                        // DrawBorder(), so rounding the fill underneath it would leave a
                         // square-cornered border with mismatched round background peeking
-                        // out. Boxes with both a border and a radius fall back to the
-                        // existing square rendering until DrawBorder() itself learns to
-                        // draw rounded borders.
+                        // out: such boxes fall back to the existing square rendering.
                         int rx[4]={0,0,0,0}, ry[4]={0,0,0,0};
-                        if ( styleHasBorderRadii(style.get()) && !styleHasAnyBorder(style.get()) )
-                            computeBorderRadiiPx(enode, style.get(), fmt.getWidth(), fmt.getHeight(), rx, ry);
+                        if ( styleHasBorderRadii(style.get()) ) {
+                            bool no_border = !styleHasAnyBorder(style.get());
+                            int w_top, w_right, w_bottom, w_left; lUInt32 ring_color;
+                            bool fast_ring = !no_border && styleQualifiesForFastRoundedBorder(enode, style.get(), w_top, w_right, w_bottom, w_left, ring_color);
+                            if (no_border || fast_ring)
+                                computeBorderRadiiPx(enode, style.get(), fmt.getWidth(), fmt.getHeight(), rx, ry);
+                        }
                         if (rx[0]||rx[1]||rx[2]||rx[3]||ry[0]||ry[1]||ry[2]||ry[3])
                             fillRoundedRect(drawbuf, x0 + doc_x, y0 + doc_y, x0 + doc_x+fmt.getWidth(), y0+doc_y+fmt.getHeight(), rx, ry, bg_color);
                         else
