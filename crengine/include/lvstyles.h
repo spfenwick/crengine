@@ -80,7 +80,8 @@ enum css_style_rec_important_bit {
     imp_bit_border_color_left,
     imp_bit_background_image,
     imp_bit_background_repeat,
-    imp_bit_background_position,
+    imp_bit_background_position_x,
+    imp_bit_background_position_y,
     imp_bit_background_size_h,
     imp_bit_background_size_v,
     imp_bit_border_collapse,
@@ -109,7 +110,7 @@ enum css_style_rec_important_bit {
     imp_bit_border_radius_bl_h,
     imp_bit_border_radius_bl_v
 };
-#define NB_IMP_BITS 81 // The number of lines in the enum above: KEEP IT UPDATED.
+#define NB_IMP_BITS 82 // The number of lines in the enum above: KEEP IT UPDATED.
 
 #define NB_IMP_SLOTS    ((NB_IMP_BITS-1)>>5)+1
 // In lvstyles.cpp, we have hardcoded important[0] ... importance[2]
@@ -187,7 +188,16 @@ struct css_style_rec_tag {
     css_length_t border_radius_v[4]; // Order: TL, TR, BR, BL.
     lString8 background_image;
     css_background_repeat_value_t background_repeat;
-    css_background_position_value_t background_position;
+    css_length_t background_position[2]; ///< horizontal, vertical
+    // If true, the corresponding background_position[] component is a CSS3
+    // edge-offset length (eg. the "10px" in "background-position: right 10px")
+    // that could not be reduced to a plain percentage at parse time, and must
+    // be measured as an inset from the right/bottom edge of the positioning
+    // area instead of as an absolute offset from the left/top edge. A
+    // percentage offset (eg. "right 20%") is always reduced to an equivalent
+    // plain percentage at parse time (100% - 20% == 80%), so never sets this.
+    bool background_position_x_from_end;
+    bool background_position_y_from_end;
     css_length_t background_size[2];//first width and second height
     css_border_collapse_value_t border_collapse;
     css_length_t border_spacing[2];//first horizontal and the second vertical spacing
@@ -253,7 +263,8 @@ struct css_style_rec_tag {
     , border_style_right(css_border_none)
     , border_style_left(css_border_none)
     , background_repeat(css_background_repeat)
-    , background_position(css_background_left_top)
+    , background_position_x_from_end(false)
+    , background_position_y_from_end(false)
     , border_collapse(css_border_c_inherit)
     , orphans(css_orphans_widows_inherit)
     , widows(css_orphans_widows_inherit)
@@ -298,6 +309,9 @@ struct css_style_rec_tag {
         // background-size defaults to "auto auto"
         background_size[0] = css_length_t(css_val_unspecified, css_generic_auto);
         background_size[1] = css_length_t(css_val_unspecified, css_generic_auto);
+        // background-position defaults to "0% 0%" (ie. "left top")
+        background_position[0] = css_length_t(css_val_percent, 0);
+        background_position[1] = css_length_t(css_val_percent, 0);
         // border-radius defaults to 0 (no rounding); use css_val_unspecified (rather
         // than the css_length_t() default of css_val_screen_px) so a not-yet-set
         // radius can be distinguished from an explicit "0" further down the line.
