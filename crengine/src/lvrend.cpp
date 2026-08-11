@@ -9754,13 +9754,16 @@ static void fillRoundedRectBorder(LVDrawBuf & drawbuf, int x0, int y0, int x1, i
 
 // Whether the style's border, as DrawBorder() would render it, qualifies for
 // the fillRoundedRectBorderFast() single-pass ring: every *present* side is
-// solid and shares one (opaque) colour with every other present side; a side
-// can also be entirely absent (no width/style/colour needed for it). Widths
-// may differ per side, since fillRoundedRectBorderFast() already shrinks
-// each side by its own width (0 for an absent side skips it).
+// `required_style` (solid, for the plain single-ring border; double, for one
+// pass -- outer or inner -- of a double border) and shares one (opaque)
+// colour with every other present side; a side can also be entirely absent
+// (no width/style/colour needed for it). Widths may differ per side, since
+// fillRoundedRectBorderFast() already shrinks each side by its own width (0
+// for an absent side skips it).
 static bool styleQualifiesForFastRoundedBorder(ldomNode * node, const css_style_rec_t * style,
                                                 int &w_top, int &w_right, int &w_bottom, int &w_left,
-                                                lUInt32 &ring_color) {
+                                                lUInt32 &ring_color,
+                                                css_border_style_type_t required_style = css_border_solid) {
     bool has[4];
     lUInt32 color[4];
     bool have_color = false;
@@ -9775,8 +9778,8 @@ static bool styleQualifiesForFastRoundedBorder(ldomNode * node, const css_style_
         has[i] = has[i] && !IS_COLOR_FULLY_TRANSPARENT(color[i]);
         if (!has[i])
             continue; // absent side: no style/width/colour constraint
-        if (bs != css_border_solid)
-            return false; // present but non-solid: not a fast-path candidate
+        if (bs != required_style)
+            return false; // present but not the required style: not a fast-path candidate
         if (!have_color) { common_color = color[i]; have_color = true; }
         else if (color[i] != common_color)
             return false; // present sides disagree on colour
@@ -10413,6 +10416,27 @@ static bool styleQualifiesForFastDashedRoundedBorder(ldomNode * node, const css_
     return true;
 }
 
+// Splits a DOUBLE border side's declared width into its outer line, gap and
+// inner line thicknesses -- roughly a third of *half* the declared width
+// each (so ~1/6 of the total per line), leaving a much wider gap between
+// them, rather than splitting the width into even thirds. Matches the
+// legacy (non-rounded) double-border split, see the css_border_double case
+// further below in DrawBorder(): a rounded and a square double border of the
+// same declared width must render with the same line/gap thicknesses on
+// their straight edges.
+static void splitDoubleBorderWidth(int w, int &outer, int &gap, int &inner)
+{
+    int half = w / 2;
+    outer = half / (half > 2 ? 3 : 2) + 1;
+    int rem = w - half;
+    inner = rem / (rem > 2 ? 3 : 2) + 1;
+    if (outer > w)
+        outer = w;
+    if (inner > w - outer)
+        inner = w - outer;
+    gap = w - outer - inner;
+}
+
 // Draw one straight side (no border-radius) of a DOTTED border as a row of
 // round dabs via fillCircle/walkAndDashSegments -- the same approach used for
 // rounded corners -- instead of the square axis-aligned dabs the legacy
@@ -10527,6 +10551,37 @@ void DrawBorder(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int doc_x,int 
                     if (invert_colors)
                         ring_color = invertNonGrayscaleColor(ring_color);
                     fillRoundedRectDashedRing(drawbuf, X0, Y0, X1, Y1, rx, ry, ring_width, dotted, ring_color);
+                    return;
+                }
+
+                // Every present side DOUBLE, same (opaque) color, widths may
+                // differ per side -> two fillRoundedRectBorderFast() passes
+                // (outer ring then inner ring) instead of the general
+                // per-side path's two array-colored fillRoundedRectBorder()
+                // calls.
+                int dw_top, dw_right, dw_bottom, dw_left; lUInt32 dbl_color;
+                if (styleQualifiesForFastRoundedBorder(enode, style.get(), dw_top, dw_right, dw_bottom, dw_left, dbl_color, css_border_double)) {
+                    if (invert_colors)
+                        dbl_color = invertNonGrayscaleColor(dbl_color);
+                    int outer_t, gap_t, inner_t; splitDoubleBorderWidth(dw_top, outer_t, gap_t, inner_t);
+                    int outer_b, gap_b, inner_b; splitDoubleBorderWidth(dw_bottom, outer_b, gap_b, inner_b);
+                    int outer_r, gap_r, inner_r; splitDoubleBorderWidth(dw_right, outer_r, gap_r, inner_r);
+                    int outer_l, gap_l, inner_l; splitDoubleBorderWidth(dw_left, outer_l, gap_l, inner_l);
+
+                    int w_ot = dw_top > 0 ? outer_t : 0, w_ob = dw_bottom > 0 ? outer_b : 0;
+                    int w_or = dw_right > 0 ? outer_r : 0, w_ol = dw_left > 0 ? outer_l : 0;
+                    fillRoundedRectBorderFast(drawbuf, X0, Y0, X1, Y1, rx, ry, w_ot, w_or, w_ob, w_ol, dbl_color);
+
+                    int insetT = dw_top > 0 ? (outer_t + gap_t) : 0, insetB = dw_bottom > 0 ? (outer_b + gap_b) : 0;
+                    int insetR = dw_right > 0 ? (outer_r + gap_r) : 0, insetL = dw_left > 0 ? (outer_l + gap_l) : 0;
+                    int iX0 = X0 + insetL, iY0 = Y0 + insetT, iX1 = X1 - insetR, iY1 = Y1 - insetB;
+                    if (iX0 < iX1 && iY0 < iY1) {
+                        int irx[4] = {std::max(0, rx[0] - insetL), std::max(0, rx[1] - insetR), std::max(0, rx[2] - insetR), std::max(0, rx[3] - insetL)};
+                        int iry[4] = {std::max(0, ry[0] - insetT), std::max(0, ry[1] - insetT), std::max(0, ry[2] - insetB), std::max(0, ry[3] - insetB)};
+                        int w_it = dw_top > 0 ? inner_t : 0, w_ib = dw_bottom > 0 ? inner_b : 0;
+                        int w_ir = dw_right > 0 ? inner_r : 0, w_il = dw_left > 0 ? inner_l : 0;
+                        fillRoundedRectBorderFast(drawbuf, iX0, iY0, iX1, iY1, irx, iry, w_it, w_ir, w_ib, w_il, dbl_color);
+                    }
                     return;
                 }
 
@@ -10784,33 +10839,14 @@ void DrawBorder(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int doc_x,int 
                     // fillRoundedRectBorderFast correct for the plain uniform-border case.
                     if (side_is_double[0] || side_is_double[1] || side_is_double[2] || side_is_double[3]) {
                         lUInt32 c[4] = {sideColors[0], sideColors[1], sideColors[2], sideColors[3]};
-                        // Match the legacy (non-rounded) double-border split -- see the
-                        // css_border_double case further below, which draws each line as
-                        // roughly a third of *half* the declared width (so ~1/6 of the
-                        // total each), leaving a much wider gap between them -- rather
-                        // than splitting the width into even thirds. A rounded and a
-                        // square double border of the same declared width must render
-                        // with the same line/gap thicknesses on their straight edges.
-                        auto splitDouble = [](int w, int &outer, int &gap, int &inner)
-                        {
-                            int half = w / 2;
-                            outer = half / (half > 2 ? 3 : 2) + 1;
-                            int rem = w - half;
-                            inner = rem / (rem > 2 ? 3 : 2) + 1;
-                            if (outer > w)
-                                outer = w;
-                            if (inner > w - outer)
-                                inner = w - outer;
-                            gap = w - outer - inner;
-                        };
                         int outer_t, gap_t, inner_t;
-                        splitDouble(tbw, outer_t, gap_t, inner_t);
+                        splitDoubleBorderWidth(tbw, outer_t, gap_t, inner_t);
                         int outer_b, gap_b, inner_b;
-                        splitDouble(bbw, outer_b, gap_b, inner_b);
+                        splitDoubleBorderWidth(bbw, outer_b, gap_b, inner_b);
                         int outer_r, gap_r, inner_r;
-                        splitDouble(rbw, outer_r, gap_r, inner_r);
+                        splitDoubleBorderWidth(rbw, outer_r, gap_r, inner_r);
                         int outer_l, gap_l, inner_l;
-                        splitDouble(lbw, outer_l, gap_l, inner_l);
+                        splitDoubleBorderWidth(lbw, outer_l, gap_l, inner_l);
 
                         // Widths: every bordered neighbor is treated as if it were
                         // itself double, split the same way from its own real
