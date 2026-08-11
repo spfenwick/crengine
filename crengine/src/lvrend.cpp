@@ -10290,6 +10290,17 @@ static void walkAndDashSegments(LVDrawBuf & drawbuf, const CRPerimeterSeg segs[]
     // here; strokeDashRunsFT() strokes it (and every other run) afterwards.
     auto flushRun = [&](double distStart, double distEnd) {
         if (dotted) {
+            // On an open (non-wrapping) chain, the run right against the
+            // chain's own start or end can come up short of a full dash_len
+            // -- fillCircle always draws at the full nominal radius (w/2)
+            // regardless of the run's actual length, so centering a full-size
+            // dot on a short run's midpoint would still bulge it past the
+            // chain's true endpoint into space the chain doesn't cover (e.g.
+            // past a square border's corner). On a closed ring (wrap) there's
+            // no "past the end" -- pointAt wraps distance back onto the ring
+            // -- so this only needs to apply when !wrap.
+            if (!wrap && distEnd - distStart < dash_len)
+                return;
             double mid = (distStart + distEnd) * 0.5;
             double px, py, iux, iuy;
             pointAt(mid, px, py, iux, iuy);
@@ -10400,6 +10411,39 @@ static bool styleQualifiesForFastDashedRoundedBorder(ldomNode * node, const css_
     ring_color = color[0];
     dotted = all_dotted;
     return true;
+}
+
+// Draw one straight side (no border-radius) of a DOTTED border as a row of
+// round dabs via fillCircle/walkAndDashSegments -- the same approach used for
+// rounded corners -- instead of the square axis-aligned dabs the legacy
+// per-side switch below draws for every other border style. The segment is
+// built directly here rather than via computeRoundRectCenterline: that
+// helper insets a corner point by half the border width on *both* axes,
+// which is correct for a genuinely rounded corner (the arc needs that room
+// to curve) but would be a spurious extra inset along the edge's own
+// direction for a true square corner, pulling the dot row's ends away from
+// the actual corner for no reason. Here only the perpendicular axis is
+// inset by w/2, to center the dot row in the border's own thickness -- the
+// edge still runs all the way from x0/y0 to x1/y1 along its own direction,
+// so a dot can land right at (or straddle) the true corner. wrap=false in
+// walkAndDashSegments means the dash phase always starts fresh (distance 0)
+// at this side's own first endpoint rather than carrying over from a
+// neighbor -- every side is drawn this way independently, uniform border or
+// not, so adjacent dotted sides are not guaranteed to line up at a corner.
+static void fillDottedSquareBorderSide(LVDrawBuf &drawbuf, int x0, int y0, int x1, int y1,
+                                        int side, int w, lUInt32 color)
+{
+    if (w <= 0)
+        return;
+    double h = w * 0.5;
+    CRPerimeterSeg seg;
+    switch (side) {
+        case 0: seg = crMakeEdgeSeg(x0, y0 + h, x1, y0 + h, 0.0, +1.0); break; // top: left -> right
+        case 1: seg = crMakeEdgeSeg(x1 - h, y0, x1 - h, y1, -1.0, 0.0); break; // right: top -> bottom
+        case 2: seg = crMakeEdgeSeg(x1, y1 - h, x0, y1 - h, 0.0, -1.0); break; // bottom: right -> left
+        default: seg = crMakeEdgeSeg(x0 + h, y1, x0 + h, y0, +1.0, 0.0); break; // left: bottom -> top
+    }
+    walkAndDashSegments(drawbuf, &seg, 1, false, w, true, color);
 }
 
 //draw border lines,support color,width,all styles, not support border-collapse
@@ -10934,10 +10978,8 @@ void DrawBorder(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int doc_x,int 
             rightrate=(double)rightBorderwidth/(double)topBorderwidth;
             switch (style->border_style_top){
                 case css_border_dotted:
-                    dot=interval=topBorderwidth;
-                    for(int i=0;i<leftpoint3.y-leftpoint1.y;i++)
-                    {drawbuf.DrawLine(leftpoint1.x+i*leftrate, leftpoint1.y+i, rightpoint1.x-i*rightrate+1,
-                                      rightpoint1.y+i+1, topBordercolor,dot,interval,0);}
+                    fillDottedSquareBorderSide(drawbuf, x0+doc_x, y0+doc_y, x0+doc_x+fmt.getWidth(), y0+doc_y+fmt.getHeight(),
+                                                0, topBorderwidth, topBordercolor);
                     break;
                 case css_border_dashed:
                     dot=3*topBorderwidth;
@@ -11039,11 +11081,8 @@ void DrawBorder(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int doc_x,int 
             bottomrate=(double)bottomBorderwidth/(double)rightBorderwidth;
             switch (style->border_style_right){
                 case css_border_dotted:
-                    dot=interval=rightBorderwidth;
-                    for (int i=0;i<toppoint1.x-toppoint3.x;i++){
-                        drawbuf.DrawLine(toppoint1.x-i,toppoint1.y+i*toprate,bottompoint1.x-i+1,
-                                         bottompoint1.y-i*bottomrate+1, rightBordercolor,dot,interval,1);
-                    }
+                    fillDottedSquareBorderSide(drawbuf, x0+doc_x, y0+doc_y, x0+doc_x+fmt.getWidth(), y0+doc_y+fmt.getHeight(),
+                                                1, rightBorderwidth, rightBordercolor);
                     break;
                 case css_border_dashed:
                     dot=3*rightBorderwidth;
@@ -11154,10 +11193,8 @@ void DrawBorder(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int doc_x,int 
             rightrate=(double)rightBorderwidth/(double)bottomBorderwidth;
             switch (style->border_style_bottom){
                 case css_border_dotted:
-                    dot=interval=bottomBorderwidth;
-                    for(int i=0;i<leftpoint1.y-leftpoint3.y;i++)
-                    {drawbuf.DrawLine(leftpoint1.x+i*leftrate, leftpoint1.y-i, rightpoint1.x-i*rightrate+1,
-                                      rightpoint1.y-i+1, bottomBordercolor,dot,interval,0);}
+                    fillDottedSquareBorderSide(drawbuf, x0+doc_x, y0+doc_y, x0+doc_x+fmt.getWidth(), y0+doc_y+fmt.getHeight(),
+                                                2, bottomBorderwidth, bottomBordercolor);
                     break;
                 case css_border_dashed:
                     dot=3*bottomBorderwidth;
@@ -11258,11 +11295,8 @@ void DrawBorder(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int doc_x,int 
             bottomrate=(double)bottomBorderwidth/(double)leftBorderwidth;
             switch (style->border_style_left){
                 case css_border_dotted:
-                    dot=interval=leftBorderwidth;
-                    for (int i=0;i<toppoint3.x-toppoint1.x;i++){
-                        drawbuf.DrawLine(toppoint1.x+i,toppoint1.y+i*toprate,bottompoint1.x+i+1,
-                                         bottompoint1.y-i*bottomrate+1,leftBordercolor,dot,interval,1);
-                    }
+                    fillDottedSquareBorderSide(drawbuf, x0+doc_x, y0+doc_y, x0+doc_x+fmt.getWidth(), y0+doc_y+fmt.getHeight(),
+                                                3, leftBorderwidth, leftBordercolor);
                     break;
                 case css_border_dashed:
                     dot=3*leftBorderwidth;
