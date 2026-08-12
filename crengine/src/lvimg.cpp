@@ -2425,8 +2425,15 @@ protected:
 	// _src our target size via GetTargetSize() below, and OnLineDecoded() just passes
 	// its (already correctly-sized) lines straight through instead of remapping them.
 	bool _srcIsScalableStretch;
+	// True when a smooth (interpolated) scale was requested *and* applies here: a
+	// genuine two-axis stretch of a fixed-resolution raster that actually changes
+	// size. We buffer the whole decoded source into _decoded, and OnEndDecode()
+	// runs it through the same smooth scaler used for normal <img> elements
+	// (CRe::qSmoothScaleImage), instead of nearest-neighbor remapping line by line.
+	bool _smoothscale;
+	lUInt8 * __restrict _decoded;
 public:
-    LVStretchImgSource( LVImageSourceRef src, int newWidth, int newHeight, ImageTransform hTransform, ImageTransform vTransform, int splitX, int splitY )
+    LVStretchImgSource( LVImageSourceRef src, int newWidth, int newHeight, ImageTransform hTransform, ImageTransform vTransform, int splitX, int splitY, bool smooth = false )
 		: _src( src )
 		, _src_dx( src->GetWidth() )
 		, _src_dy( src->GetHeight() )
@@ -2437,6 +2444,9 @@ public:
 		, _split_x( splitX )
 		, _split_y( splitY )
 		, _srcIsScalableStretch( src->IsScalable() && hTransform == IMG_TRANSFORM_STRETCH && vTransform == IMG_TRANSFORM_STRETCH )
+		, _smoothscale( smooth && hTransform == IMG_TRANSFORM_STRETCH && vTransform == IMG_TRANSFORM_STRETCH
+		                && !_srcIsScalableStretch && (_src_dx != newWidth || _src_dy != newHeight) )
+		, _decoded(0)
 	{
         if ( _hTransform == IMG_TRANSFORM_TILE )
             if ( _split_x>=_src_dx )
@@ -2448,6 +2458,8 @@ public:
 			_split_x = _src_dx / 2;
 		if ( _split_y<0 || _split_y>=_src_dy )
 			_split_y = _src_dy / 2;
+        if ( _smoothscale )
+            _decoded = new lUInt8[ _src_dy * (_src_dx * 4) ];
 	}
     virtual void OnStartDecode( LVImageSource * )
 	{
@@ -2455,9 +2467,19 @@ public:
         _callback->OnStartDecode(this);
 	}
     virtual bool OnLineDecoded( LVImageSource * obj, int y, lUInt32 * __restrict data );
-    virtual void OnEndDecode( LVImageSource *, bool res)
+    virtual void OnEndDecode( LVImageSource * obj, bool res)
 	{
 		_line.clear();
+        if ( _smoothscale && !res ) {
+            lUInt8 * __restrict sdata = CRe::qSmoothScaleImage(_decoded, _src_dx, _src_dy, false, _dst_dx, _dst_dy);
+            if ( sdata ) {
+                for ( int y=0; y<_dst_dy; y++ )
+                    _callback->OnLineDecoded( obj, y, (lUInt32 *)(sdata + y * (_dst_dx * 4)) );
+                free(sdata);
+            }
+            // else: smooth scaling failed, draw nothing for this image (same as the
+            // normal <img> smooth scaler's failure behavior in LVImageScaledDrawCallback)
+        }
         _callback->OnEndDecode(this, res);
     }
     // LVImageDecoderCallback: called by _src->Decode(this) below to ask us (as
@@ -2484,6 +2506,8 @@ public:
 	}
     virtual ~LVStretchImgSource()
 	{
+        if ( _decoded )
+            delete[] _decoded;
 	}
 };
 
@@ -2494,6 +2518,13 @@ bool LVStretchImgSource::OnLineDecoded( LVImageSource * obj, int y, lUInt32 * __
         // at _dst_dx x _dst_dy, so this line is already exactly what we want:
         // no pixel remapping needed, just forward it as-is.
         return _callback->OnLineDecoded( obj, y, data );
+    }
+
+    if ( _smoothscale ) {
+        // Defer everything to OnEndDecode()'s smooth-scaling pass: just stash
+        // this source line at native resolution.
+        memcpy(_decoded + (y * (_src_dx * 4)), data, (_src_dx * 4));
+        return true;
     }
 
     bool res = false;
@@ -2582,11 +2613,11 @@ bool LVStretchImgSource::OnLineDecoded( LVImageSource * obj, int y, lUInt32 * __
 }
 
 /// creates image which stretches source image by filling center with pixels at splitX, splitY
-LVImageSourceRef LVCreateStretchFilledTransform( LVImageSourceRef src, int newWidth, int newHeight, ImageTransform hTransform, ImageTransform vTransform, int splitX, int splitY )
+LVImageSourceRef LVCreateStretchFilledTransform( LVImageSourceRef src, int newWidth, int newHeight, ImageTransform hTransform, ImageTransform vTransform, int splitX, int splitY, bool smooth )
 {
 	if ( src.isNull() )
 		return LVImageSourceRef();
-    return LVImageSourceRef( new LVStretchImgSource( src, newWidth, newHeight, hTransform, vTransform, splitX, splitY ) );
+    return LVImageSourceRef( new LVStretchImgSource( src, newWidth, newHeight, hTransform, vTransform, splitX, splitY, smooth ) );
 }
 
 /// creates image which fills area with tiled copy
