@@ -9895,15 +9895,34 @@ void DrawBorder(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int doc_x,int 
 }
 void DrawBackgroundImage(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int doc_x,int doc_y, int width, int height, bool clip_to_target=true)
 {
-    // (The provided width and height gives the area we have to draw the background image on)
+    // (The provided width and height gives the area we have to draw the background image on:
+    // the caller passes us the node's border box, i.e. fmt.getWidth()/getHeight(), so that
+    // background-color, painted separately by the caller, can span the default background-clip:
+    // border-box area. But background-position/-size must, per spec, be resolved against the
+    // *padding* box (the default background-origin), not the border box: without insetting by
+    // the border width here, a bordered element's background image ends up positioned/sized as
+    // if drawn from the border box's outer edge, so it's drawn too far out on the near (top/left)
+    // side (silently papered over since the border is painted after/over it) and falls short of
+    // the far (bottom/right) edge by exactly the border width, leaving a sliver of the element's
+    // own background-color visible between the image and that border.)
     css_style_ref_t style=enode->getStyle();
     if (!style->background_image.empty()) {
+        int leftBorderwidth = measureBorder(enode, 3);
+        int topBorderwidth = measureBorder(enode, 0);
+        int rightBorderwidth = measureBorder(enode, 1);
+        int bottomBorderwidth = measureBorder(enode, 2);
+        if (leftBorderwidth || topBorderwidth || rightBorderwidth || bottomBorderwidth) {
+            x0 += leftBorderwidth;
+            y0 += topBorderwidth;
+            width -= leftBorderwidth + rightBorderwidth;
+            height -= topBorderwidth + bottomBorderwidth;
+        }
         lString32 filepath = lString32(style->background_image.c_str());
         LVImageSourceRef img = enode->getParentNode()->getDocument()->getObjectImageSource(filepath);
         if (img.isNull()) { // filepath may be url-encoded
             img = enode->getParentNode()->getDocument()->getObjectImageSource(DecodeHTMLUrlString(filepath));
         }
-        if (!img.isNull()) {
+        if (!img.isNull() && width > 0 && height > 0) {
             // Raw, undecoded-transform pixel size of the image file
             int native_img_w = img->GetWidth();
             int native_img_h = img->GetHeight();
@@ -9922,9 +9941,13 @@ void DrawBackgroundImage(ldomNode *enode,LVDrawBuf & drawbuf,int x0,int y0,int d
                  bg_h.type != css_val_unspecified || bg_h.value != css_generic_auto ) {
                 int new_w = 0;
                 int new_h = 0;
-                RenderRectAccessor fmt( enode );
-                int container_w = fmt.getWidth();
-                int container_h = fmt.getHeight();
+                // Use the (already border-inset) padding box, not the node's raw
+                // border box, as the basis for percentage sizes and for cover/contain
+                // scaling -- background-size percentages, like background-position,
+                // are resolved against the background positioning area (padding box
+                // by default), not the border box.
+                int container_w = width;
+                int container_h = height;
                 bool check_lengths = true;
                 if ( bg_w.type == css_val_unspecified && bg_h.type == css_val_unspecified ) {
                     if ( bg_w.value == css_generic_contain && bg_h.value == css_generic_contain ) {
