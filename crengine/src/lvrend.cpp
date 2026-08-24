@@ -2397,27 +2397,14 @@ int LVRendGetBaseFontWeight()
     return rend_font_base_weight;
 }
 
-/// Walk up the DOM tree from `node` to find the nearest DocFragment ancestor
-/// and return its sibling index (its position among the root's children).
-/// Returns -1 if no DocFragment ancestor is found (non-EPUB documents, or
-/// nodes that are themselves above the DocFragment level).
-/// This is only a fallback for callers that don't already know the DocFragment
-/// they're working in: bulk passes over the whole tree (the recursive style
-/// pass, cache reload) already cross DocFragment boundaries explicitly as
-/// they go, and should pass that index into getFont()/initNodeFont() instead
-/// of paying for this walk on every node.
-static int getNodeDocFragmentIdx(ldomNode * node)
-{
-    for (ldomNode * n = node; n && !n->isNull() && !n->isRoot(); n = n->getParentNode()) {
-        if (n->getNodeId() == el_DocFragment)
-            return (int)n->getNodeIndex();
-    }
-    return -1;
-}
-
 /// docFragmentIdx: pass the node's DocFragment sibling index if the caller already
 /// knows it (eg. from a traversal that tracks it), or leave at the default to
-/// have it looked up by walking up from node.
+/// have it looked up by walking up from node (see ldomNode::getDocFragmentIdx()).
+/// This walk-up is only meant as a fallback for callers that don't already know
+/// the DocFragment they're working in: bulk passes over the whole tree (the
+/// recursive style pass, cache reload) already cross DocFragment boundaries
+/// explicitly as they go, and should pass that index into getFont()/initNodeFont()
+/// instead of paying for this walk on every node.
 LVFontRef getFont(ldomNode * node, css_style_rec_t * style, int documentId, int docFragmentIdx)
 {
     int sz;
@@ -2460,7 +2447,7 @@ LVFontRef getFont(ldomNode * node, css_style_rec_t * style, int documentId, int 
     if (style->font_optical_sizing != css_fos_none && gRenderDPI >= 100)
         variations.set(LVFONT_TAG_OPSZ, sz * 72.0f / (float)gRenderDPI);
     if (docFragmentIdx == DOC_FRAGMENT_IDX_UNKNOWN)
-        docFragmentIdx = (documentId != -1) ? getNodeDocFragmentIdx(node) : -1;
+        docFragmentIdx = (documentId != -1) ? node->getDocFragmentIdx() : -1;
     LVFontRef fnt = fontMan->GetFont(
         sz,
         fw,

@@ -19555,6 +19555,18 @@ bool ldomNode::isRoot() const
     return false;
 }
 
+/// walks up from this node to the nearest DocFragment ancestor and returns
+/// its sibling index, or -1 if none is found
+int ldomNode::getDocFragmentIdx() const
+{
+    ASSERT_NODE_NOT_NULL;
+    for ( const ldomNode * n = this; n && !n->isNull() && !n->isRoot(); n = n->getParentNode() ) {
+        if ( n->getNodeId() == el_DocFragment )
+            return n->getNodeIndex();
+    }
+    return -1;
+}
+
 /// call to invalidate cache if persistent node content is modified
 void ldomNode::modified()
 {
