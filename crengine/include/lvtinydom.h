@@ -1101,11 +1101,6 @@ public:
     int getChildIndex( lUInt32 dataIndex ) const;
     /// returns true if node is document's root
     bool isRoot() const;
-    /// walks up from this node to the nearest DocFragment ancestor and returns
-    /// its sibling index (its position among the root's children), or -1 if
-    /// no DocFragment ancestor is found (non-EPUB documents, or nodes above
-    /// the DocFragment level)
-    int getDocFragmentIdx() const;
     /// returns true if node is text
     inline bool isText() const { return _handle._dataIndex && !(_handle._dataIndex&1); }
     /// returns true if node is element
@@ -1316,6 +1311,12 @@ public:
 
     /// is node an image
     bool isImage() const;
+
+    /// walks up from this node to the nearest DocFragment ancestor and returns
+    /// its sibling index (its position among the root's children), or -1 if
+    /// no DocFragment ancestor is found (non-EPUB documents, or nodes above
+    /// the DocFragment level)
+    int getDocFragmentIdx() const;
 
     /// return real (as in the original HTML) parent/siblings by skipping any internal
     /// boxing element up or down (returns NULL when no more sibling)

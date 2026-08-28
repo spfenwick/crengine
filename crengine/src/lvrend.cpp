@@ -2400,11 +2400,8 @@ int LVRendGetBaseFontWeight()
 /// docFragmentIdx: pass the node's DocFragment sibling index if the caller already
 /// knows it (eg. from a traversal that tracks it), or leave at the default to
 /// have it looked up by walking up from node (see ldomNode::getDocFragmentIdx()).
-/// This walk-up is only meant as a fallback for callers that don't already know
-/// the DocFragment they're working in: bulk passes over the whole tree (the
-/// recursive style pass, cache reload) already cross DocFragment boundaries
-/// explicitly as they go, and should pass that index into getFont()/initNodeFont()
-/// instead of paying for this walk on every node.
+/// This walk-up is meant as a fallback for callers that don't already know
+/// the DocFragment they're working in.
 LVFontRef getFont(ldomNode * node, css_style_rec_t * style, int documentId, int docFragmentIdx)
 {
     int sz;

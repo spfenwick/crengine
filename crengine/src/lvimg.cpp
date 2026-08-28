@@ -2036,10 +2036,7 @@ static void lunasvgTextToPathsHelper(lunasvg::external_context_t * xcontext, con
         font_family << node->getFont()->getTypeFace().c_str();
     }
 
-    // @font-face fonts are scoped to the DocFragment (spine item) that declared
-    // them (see ldomNode::getDocFragmentIdx()). Without this, GetFont() defaults
-    // to docFragmentIdx=-1, which fails allowedForDocFragment() for any embedded
-    // font and silently falls back to a non-matching font.
+    // Find the containing docFragmentIdx so @font-face declarations are scoped correctly.
     int docFragmentIdx = (docId != -1 && node) ? node->getDocFragmentIdx() : -1;
 
     // We may get very small or very large font size from SVG, so work with a normal font
