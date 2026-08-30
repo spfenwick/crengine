@@ -21453,6 +21453,17 @@ bool ldomNode::getNodeListMarker( int & counterValue, lString32 & marker, int & 
 #endif
 }
 
+/// walks up from this node to the nearest DocFragment ancestor and returns
+/// its sibling index, or -1 if none is found
+int ldomNode::getDocFragmentIdx() const
+{
+    ASSERT_NODE_NOT_NULL;
+    for ( const ldomNode * n = this; n && !n->isNull() && !n->isRoot(); n = n->getParentNode() ) {
+        if ( n->getNodeId() == el_DocFragment )
+            return n->getNodeIndex();
+    }
+    return -1;
+}
 
 /// returns first child node
 ldomNode * ldomNode::getFirstChild() const
@@ -21900,18 +21911,6 @@ public:
 
     }
 };
-
-/// walks up from this node to the nearest DocFragment ancestor and returns
-/// its sibling index, or -1 if none is found
-int ldomNode::getDocFragmentIdx() const
-{
-    ASSERT_NODE_NOT_NULL;
-    for ( const ldomNode * n = this; n && !n->isNull() && !n->isRoot(); n = n->getParentNode() ) {
-        if ( n->getNodeId() == el_DocFragment )
-            return n->getNodeIndex();
-    }
-    return -1;
-}
 
 bool ldomNode::isImage() const
 {
