@@ -759,6 +759,8 @@ public:
     virtual void Draw( int x0, int y0, const lUInt8 * bitmap, int width, int height, const lUInt32 * __restrict palette ) {
         if ( width == 0 || height == 0)
             return;
+        if ( by_line && !left_max_x ) // allocation failed in constructor: nothing to record ink into
+            return;
         int y1 = y0 + height;
         int x1 = x0 + width;
         if (drawing_right) {
@@ -819,6 +821,8 @@ public:
     int getDistance() {
         int min_distance = 0x7FFFFFFF;
         if (by_line) {
+            if ( !left_max_x ) // allocation failed in constructor: report no overlap detected
+                return min_distance;
             for (int i=0; i<buf_height; i++) {
                 // if right_min_x = left_max_x, they overlap, so this -1
                 int distance = right_min_x[i] - left_max_x[i] - 1;
@@ -843,9 +847,20 @@ public:
             if ( by_line ) {
                 left_max_x = (int*)malloc( sizeof(int) * buf_height );
                 right_min_x = (int*)malloc( sizeof(int) * buf_height );
-                for (int i=0; i<buf_height; i++) {
-                    left_max_x[i] = - 0x0FFFFFFF; // -infinity
-                    right_min_x[i] = 0x0FFFFFFF;  // +infinity
+                if ( left_max_x && right_min_x ) {
+                    for (int i=0; i<buf_height; i++) {
+                        left_max_x[i] = - 0x0FFFFFFF; // -infinity
+                        right_min_x[i] = 0x0FFFFFFF;  // +infinity
+                    }
+                }
+                else {
+                    // Partial or total allocation failure: free whichever succeeded and
+                    // leave both NULL, so a single "!left_max_x" check (used by Draw()
+                    // and getDistance()) reliably detects this buffer as unavailable.
+                    free(left_max_x);
+                    free(right_min_x);
+                    left_max_x = NULL;
+                    right_min_x = NULL;
                 }
             }
             else {

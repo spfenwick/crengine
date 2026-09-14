@@ -440,7 +440,7 @@ struct CRPerimeterSeg {
 };
 
 static CRPerimeterSeg crMakeEdgeSeg(double ex0, double ey0, double ex1, double ey1, double iux, double iuy) {
-    CRPerimeterSeg sg;
+    CRPerimeterSeg sg = {};
     sg.isArc = false;
     double dx = ex1 - ex0, dy = ey1 - ey0;
     sg.len = sqrt(dx*dx + dy*dy);
@@ -454,7 +454,7 @@ static CRPerimeterSeg crMakeEdgeSeg(double ex0, double ey0, double ex1, double e
 // Builds the cumulative arc-length table (64 samples) used to map a local
 // distance along this arc back to an angle t.
 static CRPerimeterSeg crMakeArcSeg(double cx, double cy, double crx, double cry, double t0, double t1) {
-    CRPerimeterSeg sg;
+    CRPerimeterSeg sg = {};
     sg.isArc = true;
     sg.cx = cx; sg.cy = cy; sg.crx = crx; sg.cry = cry; sg.t0 = t0; sg.t1 = t1;
     sg.cum[0] = 0.0;
