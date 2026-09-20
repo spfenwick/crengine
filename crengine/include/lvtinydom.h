@@ -2795,7 +2795,7 @@ public:
     void registerEmbeddedFonts();
     /// register a font declared by a parsed @font-face CSS rule, as a side-effect
     /// of CSS parsing; appends to the embedded font list only on success
-    bool registerFontFace(lString32 url, lString8 face, int weight, bool italic, bool isLocal);
+    bool registerFontFace(lString32 url, lString8 face, int weight, float width, bool italic, bool isLocal);
 #endif
 
     /// returns pointer to TOC root node
