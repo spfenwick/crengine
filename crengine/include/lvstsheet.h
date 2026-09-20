@@ -267,6 +267,7 @@ public:
         int       weight;
         bool      italic;
         bool      isLocal;
+        float     width;    // font-width descriptor in percent; LVFONT_WIDTH_UNSET = auto
     };
 
 private:
@@ -311,11 +312,12 @@ private:
 
 public:
 
-    void addFontFaceDecl(lString32 url, lString8 face, int weight, bool italic, bool isLocal) {
+    void addFontFaceDecl(lString32 url, lString8 face, int weight, bool italic, bool isLocal, float width = LVFONT_WIDTH_UNSET) {
         if ( !_trackFontFaceDecls )
             return;
         LVFontFaceDecl d;
         d.url = url; d.face = face; d.weight = weight; d.italic = italic; d.isLocal = isLocal;
+        d.width = width;
         _fontFaceDecls.add(d);
     }
     const LVArray<LVFontFaceDecl> & getFontFaceDecls() const { return _fontFaceDecls; }

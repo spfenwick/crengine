@@ -65,6 +65,8 @@ enum css_decl_code {
     cssd_font_size,
     cssd_font_style,
     cssd_font_weight,
+    cssd_font_width,
+    cssd_font_stretch,            // legacy name of font-width: same handling
     cssd_font_features,           // font-feature-settings (not yet parsed)
     cssd_font_optical_sizing,
     cssd_font_variant,            // all these are parsed specifically and mapped into
@@ -184,6 +186,8 @@ static const char * css_decl_name[] = {
     "font-size",
     "font-style",
     "font-weight",
+    "font-width",
+    "font-stretch", // legacy name of font-width
     "font-feature-settings",
     "font-optical-sizing",
     "font-variant",
@@ -2976,15 +2980,62 @@ static const char * css_fos_names[] =
     NULL
 };
 
+// font-width (legacy name: font-stretch) keywords and their percentages (in tenths of a percent)
+// https://www.w3.org/TR/css-fonts-4/#font-width-prop
+static const char * css_fwd_kw_names[] =
+{
+    "ultra-condensed",
+    "extra-condensed",
+    "semi-condensed",
+    "condensed",
+    "normal",
+    "semi-expanded",
+    "extra-expanded",
+    "ultra-expanded",
+    "expanded",
+    NULL
+};
+static const lUInt16 css_fwd_kw_vals[] =
+{
+    500, 625, 875, 750, 1000, 1125, 1500, 2000, 1250
+};
+
+// Parses a single font-width value: a keyword, or a non-negative <percentage>.
+// On success, tenths is the value in tenths of a percent, clamped to [1, CSS_FWD_MAX].
+// Bare numbers and other units are invalid, as per spec.
+static bool parse_font_width_value( const char * &str, int & tenths )
+{
+    skip_spaces(str);
+    int kw = parse_name( str, css_fwd_kw_names, -1 );
+    if ( kw >= 0 ) {
+        tenths = css_fwd_kw_vals[kw];
+        return true;
+    }
+    const char * orig = str;
+    css_length_t num_val;
+    if ( !parse_number_value( str, num_val, true, false, false, false, false, false )
+            || num_val.type != css_val_percent ) {
+        str = orig;
+        return false;
+    }
+    int v = (int)(((lInt64)num_val.value * 10 + 128) >> 8); // 24.8 fixed point percent -> tenths
+    if ( v < 1 )            v = 1;
+    if ( v > CSS_FWD_MAX )  v = CSS_FWD_MAX;
+    tenths = v;
+    return true;
+}
+
 // @font-face descriptors: https://developer.mozilla.org/en-US/docs/Web/CSS/@font-face
 // (font-display is not parsed: it only affects load-time swap/fallback behaviour
 // for network-fetched web fonts, which doesn't apply to fonts read from an EPUB
-// container or the local filesystem. font-stretch and unicode-range are not
-// parsed either: neither is acted on by the font selector.)
+// container or the local filesystem. unicode-range is not parsed either: it is
+// not acted on by the font selector.)
 enum css_fontface_descriptor_code {
     cssff_font_family,
     cssff_font_weight,
     cssff_font_style,
+    cssff_font_width,
+    cssff_font_stretch, // legacy name of font-width
     cssff_src,
     cssff_unknown
 };
@@ -2993,6 +3044,8 @@ static const char * css_fontface_descriptor_names[] = {
     "font-family",
     "font-weight",
     "font-style",
+    "font-width",
+    "font-stretch", // legacy name of font-width
     "src",
     NULL
 };
@@ -3127,6 +3180,9 @@ static void parse_font_face_rule( const char * &str, lxmlDocBase * doc, lString3
     lString8 family;
     int weight = 400;
     bool italic = false;
+    // Width in percent (100 = normal). LVFONT_WIDTH_UNSET = descriptor not given (auto): a variable
+    // face keeps whatever range its own font file declares.
+    float width = LVFONT_WIDTH_UNSET;
     lString32 url;
     bool isLocal = false;
     bool haveSrc = false;
@@ -3184,6 +3240,25 @@ static void parse_font_face_rule( const char * &str, lxmlDocBase * doc, lString3
                     italic = ( n == css_fs_italic || n == css_fs_oblique );
                 }
                 break;
+            case cssff_font_width:
+            case cssff_font_stretch:
+                {
+                    // Like font-weight above, a single value only (no range): 'auto' |
+                    // <keyword> | <percentage>. Only takes effect on a static face (no
+                    // wdth axis in the file): it becomes that face's declared width, used
+                    // to choose between faces (see LVFreeTypeFontManager::applyWidthDescriptor()).
+                    // A face with a real wdth axis ignores it, same as font-weight ignores
+                    // a descriptor when the file already has a wght axis.
+                    // Invalid values are ignored, like any other descriptor.
+                    int a;
+                    if ( substr_icompare("auto", str) ) {
+                        width = LVFONT_WIDTH_UNSET;
+                    }
+                    else if ( parse_font_width_value(str, a) ) {
+                        width = a / 10.0f;
+                    }
+                }
+                break;
             case cssff_src:
                 {
                     lString8 value = extract_fontface_value(str);
@@ -3205,9 +3280,9 @@ static void parse_font_face_rule( const char * &str, lxmlDocBase * doc, lString3
         str++;
 
     if ( doc && haveSrc && !family.empty() ) {
-        ((ldomDocument *)doc)->registerFontFace(url, family, weight, italic, isLocal);
+        ((ldomDocument *)doc)->registerFontFace(url, family, weight, italic, isLocal, width);
         if ( stylesheet )
-            stylesheet->addFontFaceDecl(url, family, weight, italic, isLocal);
+            stylesheet->addFontFaceDecl(url, family, weight, italic, isLocal, width);
     }
 }
 
@@ -4312,6 +4387,22 @@ bool LVCssDeclaration::parse( const char * &decl, bool higher_importance, lxmlDo
                     }
                     buf << (lUInt32)(prop_code | importance | parsed_important | parse_important(decl));
                     buf << (lUInt32)fw_val;
+                    // don't set n — skip generic n!=-1 push
+                }
+                break;
+            case cssd_font_width:
+            case cssd_font_stretch:
+                {
+                    int fwd_val;
+                    if ( g >= 0 ) {
+                        fwd_val = (g != css_g_initial) ? css_fwd_inherit : css_fwd_normal;
+                    }
+                    else if ( !parse_font_width_value( decl, fwd_val ) ) {
+                        break;
+                    }
+                    // Both names are stored under a single property code
+                    buf << (lUInt32)(cssd_font_width | importance | parsed_important | parse_important(decl));
+                    buf << (lUInt32)fwd_val;
                     // don't set n — skip generic n!=-1 push
                 }
                 break;
@@ -5886,6 +5977,10 @@ void LVCssDeclaration::apply( css_style_rec_t * style, const ldomNode * node ) c
             break;
         case cssd_font_size:
             style->Apply( read_length(p), &style->font_size, imp_bit_font_size, is_important );
+            style->flags |= STYLE_REC_FLAG_INHERITABLE_APPLIED;
+            break;
+        case cssd_font_width:
+            style->Apply( (lUInt16) *p++, &style->font_width, imp_bit_font_width, is_important );
             style->flags |= STYLE_REC_FLAG_INHERITABLE_APPLIED;
             break;
         case cssd_font_optical_sizing:
@@ -8098,6 +8193,7 @@ lUInt32 LVStyleSheet::getHash() const
         declHash = declHash * 31 + (lUInt32)d.weight;
         declHash = declHash * 31 + (lUInt32)d.italic;
         declHash = declHash * 31 + (lUInt32)d.isLocal;
+        declHash = declHash * 31 + (lUInt32)(int)(d.width * 10);
         hash = hash * 31 + declHash + i*7919;
     }
     return hash;
