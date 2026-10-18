@@ -560,6 +560,9 @@ public:
     /// set CSS font-feature-settings OpenType features (normalized "tag=value,..." string)
     virtual void setFeatureSettings( const lString8 & settings ) { }
 
+    /// get CSS font-variation-settings axis values (normalized "tag=value,..." string)
+    virtual lString8 getVariationSettings() const { return lString8::empty_str; }
+
     /// hash of the active variable-font axis values; 0 for static fonts or no variations
     virtual lUInt32 getVariationHash() const { return 0; }
 
@@ -768,7 +771,8 @@ public:
     virtual LVFontRef GetFont(int size, int weight, bool italic, css_font_family_t family, lString8 typeface,
                                 int features=0, int documentId = -1, bool useBias=false,
                                 const LVFontVariations* variations=NULL, int docFragmentIdx = -1,
-                                const lString8 & featureSettings = lString8::empty_str) = 0;
+                                const lString8 & featureSettings = lString8::empty_str,
+                                const lString8 & variationSettings = lString8::empty_str) = 0;
 
     /// return available font weight values
     virtual void GetAvailableFontWeights(LVArray<int>& weights, lString8 typeface) = 0;

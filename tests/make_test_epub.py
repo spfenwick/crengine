@@ -59,6 +59,7 @@ CONTENT_OPF = """\
     <item id="ch10"    href="ch10.html"    media-type="application/xhtml+xml"/>
     <item id="ch11"    href="ch11.html"    media-type="application/xhtml+xml"/>
     <item id="ch12"    href="ch12.html"    media-type="application/xhtml+xml"/>
+    <item id="ch13"    href="ch13.html"    media-type="application/xhtml+xml"/>
     <item id="font-mono" href="fonts/mono.ttf" media-type="font/ttf"/>
     <item id="font-notosans" href="fonts/notosans.ttf" media-type="font/ttf"/>
     <item id="padding" href="padding.bin"  media-type="application/octet-stream"/>
@@ -76,6 +77,7 @@ CONTENT_OPF = """\
     <itemref idref="ch10"/>
     <itemref idref="ch11"/>
     <itemref idref="ch12"/>
+    <itemref idref="ch13"/>
   </spine>
 </package>
 """
@@ -135,6 +137,10 @@ TOC_NCX = """\
     <navPoint id="ch12" playOrder="12">
       <navLabel><text>12. Font Feature Settings</text></navLabel>
       <content src="ch12.html"/>
+    </navPoint>
+    <navPoint id="ch13" playOrder="13">
+      <navLabel><text>13. Font Variation Settings</text></navLabel>
+      <content src="ch13.html"/>
     </navPoint>
   </navMap>
 </ncx>
@@ -1150,6 +1156,136 @@ the parent's instead of replaced.</p>
 </html>
 """
 
+CH13 = """\\
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN"
+  "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en">
+<head><title>Font Variation Settings</title>
+<link rel="stylesheet" type="text/css" href="style.css"/>
+<style type="text/css">
+@font-face {
+  font-family: "FVSNoto";
+  src: url("fonts/notosans.ttf");
+}
+/* Google Sans Flex is bundled with KOReader. Axes: opsz 6-144, wdth 25-151,
+   wght 1-1000, GRAD 0-100, ROND 0-100, slnt -10-0. */
+.gsf   { font-family: "Google Sans Flex", sans-serif; font-size: 1.4em; }
+.noto  { font-family: "FVSNoto", sans-serif; font-size: 1.4em; }
+
+.fvs-w900      { font-variation-settings: "wght" 900; }
+.fvs-boldlight { font-weight: bold; font-variation-settings: "wght" 200; }
+.fvs-bold      { font-weight: bold; }
+.fvs-narrow    { font-variation-settings: "wdth" 25; }
+.fvs-wide      { font-width: 50%; font-variation-settings: "wdth" 151; }
+.fvs-slnt      { font-variation-settings: "slnt" -10; }
+.fvs-grad      { font-variation-settings: "GRAD" 100; }
+.fvs-rond      { font-variation-settings: "ROND" 100; }
+.fvs-multi     { font-variation-settings: "ROND" 100, 'wght' 750.5, "wdth" 75; }
+.fvs-clamp     { font-variation-settings: "wght" 1000; }
+.fvs-clamp2    { font-variation-settings: "wght" 5000; }
+.fvs-decimal   { font-variation-settings: "slnt" -.5e0, "wght" 900; }
+.fvs-lastwins  { font-variation-settings: "wght" 900, "wght" 400; }
+.fvs-unknown   { font-variation-settings: "XXXX" 50; }
+.fvs-normal { font-variation-settings: normal; }
+.fvs-inherit { font-variation-settings: inherit; }
+.fvs-invalid   { font-variation-settings: "wght" 900; font-variation-settings: "wght"; }
+.fvs-invalid2  { font-variation-settings: "wght" 900; font-variation-settings: "wght" 200px; }
+.fvs-invalid3  { font-variation-settings: "wght" 900; font-variation-settings: wght 200; }
+.fvs-imp       { font-variation-settings: "wght" 900 !important; }
+.fvs-both      { font-feature-settings: "ss01"; font-variation-settings: "wght" 800; }
+.fvs-smcp      { font-variant: small-caps; font-variation-settings: "wght" 900; }
+</style>
+</head>
+<body>
+<h1>Chapter 13 &#x2014; Font Variation Settings</h1>
+<p>CSS <code>font-variation-settings</code>, stored as a normalized string on
+the style. Values for wght, wdth, opsz, ital and slnt replace the ones that
+font-weight, font-width, font-optical-sizing and font-style give. Other axes
+(like GRAD and ROND) are passed to FreeType and HarfBuzz as they are. Works
+with every kerning mode.</p>
+
+<h2>Standard axes (Google Sans Flex)</h2>
+<p class="label">Baseline: regular weight, normal width, upright</p>
+<p class="sample gsf">Hamburgefonstiv 0123</p>
+<p class="label">"wght" 900: black</p>
+<p class="sample gsf fvs-w900">Hamburgefonstiv 0123</p>
+<p class="label">font-weight: bold (reference for the next line)</p>
+<p class="sample gsf fvs-bold">Hamburgefonstiv 0123</p>
+<p class="label">font-weight: bold + "wght" 200: light (no synthetic bold either)</p>
+<p class="sample gsf fvs-boldlight">Hamburgefonstiv 0123</p>
+<p class="label">"wdth" 25: very condensed</p>
+<p class="sample gsf fvs-narrow">Hamburgefonstiv 0123</p>
+<p class="label">font-width: 50% + "wdth" 151: very wide</p>
+<p class="sample gsf fvs-wide">Hamburgefonstiv 0123</p>
+<p class="label">"slnt" -10: slanted</p>
+<p class="sample gsf fvs-slnt">Hamburgefonstiv 0123</p>
+
+<h2>Custom axes</h2>
+<p class="label">"GRAD" 100: bolder, same line length as baseline</p>
+<p class="sample gsf fvs-grad">Hamburgefonstiv 0123</p>
+<p class="label">"ROND" 100: rounded corners and terminals</p>
+<p class="sample gsf fvs-rond">Hamburgefonstiv 0123</p>
+<p class="label">"ROND" 100, 'wght' 750.5, "wdth" 75: rounded, bold, condensed</p>
+<p class="sample gsf fvs-multi">Hamburgefonstiv 0123</p>
+<p class="label">"XXXX" 50 (axis not in font): like baseline</p>
+<p class="sample gsf fvs-unknown">Hamburgefonstiv 0123</p>
+
+<h2>Values</h2>
+<p class="label">"wght" 1000: heaviest</p>
+<p class="sample gsf fvs-clamp">Hamburgefonstiv 0123</p>
+<p class="label">"wght" 5000 (clamped to 1000): same as the line above</p>
+<p class="sample gsf fvs-clamp2">Hamburgefonstiv 0123</p>
+<p class="label">"wght" 900, "wght" 400 (last one wins): like baseline</p>
+<p class="sample gsf fvs-lastwins">Hamburgefonstiv 0123</p>
+<p class="label">"slnt" -.5e0, "wght" 900 (exponents not supported): declaration dropped, like baseline</p>
+<p class="sample gsf fvs-decimal">Hamburgefonstiv 0123</p>
+
+<h2>Inheritance (whole value, not merged)</h2>
+<div class="gsf fvs-w900">
+<p class="label">Parent "wght" 900, text directly in it: black</p>
+<p class="sample">Hamburgefonstiv 0123</p>
+<p class="label">Child span "ROND" 100: replaces the parent's value, so regular weight and rounded</p>
+<p class="sample"><span class="fvs-rond">Hamburgefonstiv 0123</span></p>
+<p class="label">Child span "normal": like baseline</p>
+<p class="sample"><span class="fvs-normal">Hamburgefonstiv 0123</span></p>
+<p class="label">Grandchild "inherit" under a "normal" span: like baseline</p>
+<p class="sample"><span class="fvs-normal"><span class="fvs-inherit">Hamburgefonstiv 0123</span></span></p>
+</div>
+
+<h2>Invalid declarations are dropped</h2>
+<p class="label">"wght" 900 then "wght" (no value): second declaration dropped, black</p>
+<p class="sample gsf fvs-invalid">Hamburgefonstiv 0123</p>
+<p class="label">"wght" 900 then "wght" 200px (unit): second declaration dropped, black</p>
+<p class="sample gsf fvs-invalid2">Hamburgefonstiv 0123</p>
+<p class="label">"wght" 900 then wght 200 (unquoted): second declaration dropped, black</p>
+<p class="sample gsf fvs-invalid3">Hamburgefonstiv 0123</p>
+
+<h2>!important</h2>
+<p class="label">Class "wght" 900 !important, inline style "normal": black</p>
+<p class="sample gsf fvs-imp" style="font-variation-settings: normal">Hamburgefonstiv 0123</p>
+
+<h2>Combinations</h2>
+<p class="label">font-feature-settings "ss01" + "wght" 800: bold, single-storey a (a stays two-storey without full HarfBuzz)</p>
+<p class="sample gsf fvs-both">Hamburgefonstiv banana</p>
+<p class="label">font-variant: small-caps + "wght" 900: black small caps (lowercase too)</p>
+<p class="sample gsf fvs-smcp">Hamburgefonstiv 0123</p>
+
+<h2>Static font (embedded Noto Sans)</h2>
+<p class="label">Baseline</p>
+<p class="sample noto">Hamburgefonstiv 0123</p>
+<p class="label">"wght" 900: no axes, so like the baseline</p>
+<p class="sample noto fvs-w900">Hamburgefonstiv 0123</p>
+
+<h2>Expected behaviour</h2>
+<p>Each line should match its label. If the "ROND" 100 child in the
+inheritance section is black, values are being merged with the parent's
+instead of replaced. If "bold + wght 200" looks bold, the font-weight
+is winning over font-variation-settings.</p>
+</body>
+</html>
+"""
+
 # ---------------------------------------------------------------------------
 # Padding
 # ---------------------------------------------------------------------------
@@ -1198,6 +1334,7 @@ def build_epub(path):
         zf.writestr("OEBPS/ch10.html",        CH10)
         zf.writestr("OEBPS/ch11.html",        CH11)
         zf.writestr("OEBPS/ch12.html",        CH12)
+        zf.writestr("OEBPS/ch13.html",        CH13)
         for dest, data in font_data.items():
             zf.writestr("OEBPS/" + dest, data)
         zf.writestr(zipfile.ZipInfo("OEBPS/padding.bin"), PADDING,

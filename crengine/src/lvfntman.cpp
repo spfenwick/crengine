@@ -1637,6 +1637,48 @@ inline lUInt32 getHash( const struct LVCharTriplet& triplet )
 }
 #endif
 
+// CSS font-variation-settings, parsed from the normalized string made by
+// lvstsheet.cpp parse_font_tag_settings(): "tttt=V,tttt=V,..." with V a
+// decimal number (optional '-', optional fraction), sorted by unique tag.
+// Tags are exactly 4 chars, which may themselves be ',' or '=' (so we
+// don't split on them).
+#define LVFONT_MAX_VARIATION_SETTINGS 16 // same as MAX_FONT_TAG_SETTINGS in lvstsheet.cpp
+struct LVFontVariationSetting {
+    lUInt32 tag;
+    float   value;
+};
+static int parseFontVariationSettings( const lString8 & settings, LVFontVariationSetting * out )
+{
+    int nb = 0;
+    const char * p = settings.c_str();
+    const char * end = p + settings.length();
+    while ( end - p >= 6 && p[4] == '=' && nb < LVFONT_MAX_VARIATION_SETTINGS ) {
+        out[nb].tag = LVFONT_TAG(p[0], p[1], p[2], p[3]);
+        p += 5;
+        bool negative = false;
+        if ( p < end && *p == '-' ) {
+            negative = true;
+            p++;
+        }
+        float value = 0;
+        while ( p < end && *p >= '0' && *p <= '9' )
+            value = value * 10 + (*p++ - '0');
+        if ( p < end && *p == '.' ) {
+            p++;
+            float scale = 0.1f;
+            while ( p < end && *p >= '0' && *p <= '9' ) {
+                value += (*p++ - '0') * scale;
+                scale /= 10;
+            }
+        }
+        out[nb].value = negative ? -value : value;
+        nb++;
+        if ( p < end && *p == ',' )
+            p++;
+    }
+    return nb;
+}
+
 class LVFreeTypeFace : public LVFont
 {
 protected:
@@ -1676,6 +1718,7 @@ protected:
     FT_Pos         _synth_weight_half_strength;
     int            _features; // requested OpenType features bitmap
     lString8       _feature_settings; // CSS font-feature-settings, normalized "tag=value,..."
+    lString8       _variation_settings; // CSS font-variation-settings, normalized "tag=value,..."
     LVFontVariations _variations; // variable font axis values applied to this instance
 #if USE_HARFBUZZ==1
     hb_font_t* _hb_font;
@@ -1779,7 +1822,8 @@ public:
             return other_font;
         return fontMan->GetFont(other_adjusted_size, other_font->getWeight(), other_font->getItalic()!=0,
                             other_font->getFontFamily(), other_font->getTypeFace(), other_font->getFeatures(), -1,
-                            false, NULL, -1, other_font->getFeatureSettings());
+                            false, NULL, -1, other_font->getFeatureSettings(),
+                            other_font->getVariationSettings());
     }
 
     int getXHeight() {
@@ -1841,7 +1885,7 @@ public:
                 getFontFamily(),
                 getTypeFace(),
                 getFeatures() | LFNT_OT_FEATURES_P_TNUM,
-                -1, false, NULL, -1, getFeatureSettings());
+                -1, false, NULL, -1, getFeatureSettings(), getVariationSettings());
             if ( _DecimalListItemFont.isNull() ) // shouldn't happen
                 _DecimalListItemFont = LVFontRef(this);
         }
@@ -2116,7 +2160,7 @@ public:
             if ( _features & LFNT_OT_FEATURES_P_JP04 ) { addHBFeature("+jp04"); }
         }
         // CSS font-feature-settings, added last so they override font-variant ones.
-        // Format (see lvstsheet.cpp parse_font_feature_settings()): "tttt=N,tttt=N,..."
+        // Format (see lvstsheet.cpp parse_font_tag_settings()): "tttt=N,tttt=N,..."
         // with exactly 4 chars per tag, which may themselves be ',' or '=' (so we
         // don't split on them, nor use hb_feature_from_string()).
         if ( !_feature_settings.empty() ) {
@@ -2158,6 +2202,14 @@ public:
     void setVariations( const LVFontVariations& variations ) {
         _variations = variations;
         _hash = 0; // force calcHash(font_ref_t) to recompute
+    }
+    // Must be called before loading (as setVariations()), setupFace() applies them.
+    void setVariationSettings( const lString8 & settings ) {
+        _variation_settings = settings;
+        _hash = 0; // force calcHash(font_ref_t) to recompute
+    }
+    virtual lString8 getVariationSettings() const {
+        return _variation_settings;
     }
     virtual lUInt32 getVariationHash() const {
         return _variations.hash();
@@ -2345,17 +2397,28 @@ public:
             0,        /* pixel_width           */
             _face_size );  /* pixel_height          */
 
+        // CSS font-variation-settings: they may set any axis, and override the
+        // standard axes values (which GetFont() has already replaced in _variations
+        // with the clamped ones, for the axes known to the face).
+        LVFontVariationSetting var_settings[LVFONT_MAX_VARIATION_SETTINGS];
+        int nb_var_settings = parseFontVariationSettings(_variation_settings, var_settings);
+
         // Apply variable font axis coordinates (wght, opsz, ...) if any were requested
-        if (!_variations.empty() && FT_Err_Ok == error) {
+        if ((!_variations.empty() || nb_var_settings > 0) && FT_Err_Ok == error) {
             FT_MM_Var* mm_var = NULL;
             if (FT_Get_MM_Var(_face, &mm_var) == FT_Err_Ok && mm_var) {
                 // Build axis coord array (FT_Fixed = 16.16) starting from defaults
+                // (FreeType clamps them to each axis range)
                 FT_Fixed * coords = new FT_Fixed[mm_var->num_axis];
                 for (FT_UInt ai = 0; ai < mm_var->num_axis; ai++) {
                     lUInt32 axTag = (lUInt32)mm_var->axis[ai].tag;
                     coords[ai] = _variations.has(axTag)
                         ? (FT_Fixed)(_variations.get(axTag) * 65536.0f)
                         : mm_var->axis[ai].def;
+                    for (int vi = 0; vi < nb_var_settings; vi++) {
+                        if (var_settings[vi].tag == axTag)
+                            coords[ai] = (FT_Fixed)(var_settings[vi].value * 65536.0f);
+                    }
                 }
                 FT_Set_Var_Design_Coordinates(_face, mm_var->num_axis, coords);
                 delete[] coords;
@@ -2406,14 +2469,20 @@ public:
                     flags |= FT_LOAD_COLOR;
                 hb_ft_font_set_load_flags(_hb_font, flags);
                 // Apply variable font variations to the HarfBuzz font as well
-                if (!_variations.empty()) {
-                    hb_variation_t hbvars[5]; // at most 5 standard axes
+                if (!_variations.empty() || nb_var_settings > 0) {
+                    // at most 5 standard axes, then the CSS ones (which win, as
+                    // HarfBuzz uses the last value given for a same axis)
+                    hb_variation_t hbvars[5 + LVFONT_MAX_VARIATION_SETTINGS];
                     unsigned int nvar = 0;
                     if (_variations.wght_set) { hbvars[nvar].tag = LVFONT_TAG_WGHT; hbvars[nvar++].value = _variations.wght; }
                     if (_variations.opsz_set) { hbvars[nvar].tag = LVFONT_TAG_OPSZ; hbvars[nvar++].value = _variations.opsz; }
                     if (_variations.ital_set) { hbvars[nvar].tag = LVFONT_TAG_ITAL; hbvars[nvar++].value = _variations.ital; }
                     if (_variations.slnt_set) { hbvars[nvar].tag = LVFONT_TAG_SLNT; hbvars[nvar++].value = _variations.slnt; }
                     if (_variations.wdth_set) { hbvars[nvar].tag = LVFONT_TAG_WDTH; hbvars[nvar++].value = _variations.wdth; }
+                    for (int vi = 0; vi < nb_var_settings; vi++) {
+                        hbvars[nvar].tag = var_settings[vi].tag;
+                        hbvars[nvar++].value = var_settings[vi].value;
+                    }
                     hb_font_set_variations(_hb_font, hbvars, nvar);
                 }
             }
@@ -5385,6 +5454,7 @@ public:
     virtual void setFeatures(int f)           { _font->setFeatures(f); }
     virtual lString8 getFeatureSettings() const          { return _font->getFeatureSettings(); }
     virtual void setFeatureSettings(const lString8 & fs) { _font->setFeatureSettings(fs); }
+    virtual lString8 getVariationSettings() const        { return _font->getVariationSettings(); }
     virtual lUInt32 getVariationHash() const  { return _font->getVariationHash(); }
     virtual int getSynthWeight() const        { return _font->getSynthWeight(); }
     virtual void setKerningMode(kerning_mode_t m)  { _font->setKerningMode(m); }
@@ -6140,6 +6210,19 @@ struct LVFontFace {
         return false;
     }
 
+    // Clamp a value to the range of one of the standard axes (to be checked with hasAxis())
+    float clampToAxis(lUInt32 tag, float v) const {
+        float mn = v, mx = v;
+        switch (tag) {
+            case LVFONT_TAG_WGHT: mn = _wght_min; mx = _wght_max; break;
+            case LVFONT_TAG_OPSZ: mn = _opsz_min; mx = _opsz_max; break;
+            case LVFONT_TAG_ITAL: mn = _ital_min; mx = _ital_max; break;
+            case LVFONT_TAG_SLNT: mn = _slnt_min; mx = _slnt_max; break;
+            case LVFONT_TAG_WDTH: mn = _wdth_min; mx = _wdth_max; break;
+        }
+        return v < mn ? mn : (v > mx ? mx : v);
+    }
+
     bool hasWeightAxis() const { return _has_wght && _wght_min < _wght_max; }
 
     /// The single weight value of a static (non-variable-weight) face, e.g. 400
@@ -6764,6 +6847,7 @@ struct LVFontInstanceKey {
     bool    requested_italic;  // CSS-requested italic; loadAndCache() synthesizes italic if face.is_italic differs
     lUInt32 computed_variations_hash;   // LVFontVariations::hash() of computed axis values
     lString8 feature_settings; // CSS font-feature-settings (full string, to avoid collisions)
+    lString8 variation_settings; // CSS font-variation-settings (full string, to avoid collisions)
 
     bool operator==(const LVFontInstanceKey& o) const {
         return face_id         == o.face_id
@@ -6773,7 +6857,8 @@ struct LVFontInstanceKey {
             && requested_weight == o.requested_weight
             && requested_italic == o.requested_italic
             && computed_variations_hash == o.computed_variations_hash
-            && feature_settings == o.feature_settings;
+            && feature_settings == o.feature_settings
+            && variation_settings == o.variation_settings;
     }
     lUInt32 hash() const {
         lUInt32 h = face_id;
@@ -6784,6 +6869,7 @@ struct LVFontInstanceKey {
         h = h * 31 + ((lUInt32)requested_italic);
         h = h * 31 + computed_variations_hash;
         h = h * 31 + feature_settings.getHash();
+        h = h * 31 + variation_settings.getHash();
         return h;
     }
 };
@@ -7937,7 +8023,8 @@ public:
     }
 
     /// Load a font face, apply synthesis, cache the instance, and return it.
-    /// (CSS font-feature-settings are taken from key.feature_settings.)
+    /// (CSS font-feature-settings and font-variation-settings are taken from
+    /// key.feature_settings and key.variation_settings.)
     LVFontRef loadAndCache(const LVFontFace& face, int size, int face_size,
                             int weight, bool italic,
                             int features, const LVFontVariations& computed_variations,
@@ -7966,6 +8053,7 @@ public:
 
         LVFreeTypeFace* font = new LVFreeTypeFace(_lock, _library, &_globalCache);
         font->setVariations(computed_variations);
+        font->setVariationSettings(key.variation_settings);
 
         bool loaded;
         if (face.buf.isNull()) {
@@ -8023,7 +8111,7 @@ public:
                                          face.css_family, face.typeface,
                                          features & ~(LFNT_OT_FEATURES_P_SMCP | LFNT_OT_FEATURES_P_C2SC),
                                          face.documentId, false, smallVars.empty() ? NULL : &smallVars,
-                                         -1, key.feature_settings);
+                                         -1, key.feature_settings, key.variation_settings);
             if (!smallRef.isNull())
                 ref = LVFontRef(new LVFontSmallCapsTransform(ref, smallRef,
                                     (features & LFNT_OT_FEATURES_P_C2SC) != 0));
@@ -8036,7 +8124,8 @@ public:
     virtual LVFontRef GetFont(int size, int weight, bool italic, css_font_family_t css_family, lString8 typeface,
                                 int features, int documentId, bool useBias=false,
                                 const LVFontVariations* variations=NULL, int docFragmentIdx = -1,
-                                const lString8 & featureSettings = lString8::empty_str)
+                                const lString8 & featureSettings = lString8::empty_str,
+                                const lString8 & variationSettings = lString8::empty_str)
     {
         FONT_MAN_GUARD
 
@@ -8056,6 +8145,21 @@ public:
             return LVFontRef(NULL);
         }
 
+        // CSS font-variation-settings override the standard axes values computed
+        // from font-weight, font-style, font-width and font-optical-sizing (as per
+        // specs, and without affecting the face selection above). Updating them here
+        // (clamped) keeps the weight related decisions in loadAndCache() right.
+        // (The other axes are applied, from the string, by LVFreeTypeFace::setupFace().)
+        if ( !variationSettings.empty() ) {
+            LVFontVariationSetting var_settings[LVFONT_MAX_VARIATION_SETTINGS];
+            int nb = parseFontVariationSettings(variationSettings, var_settings);
+            for ( int i=0; i<nb; i++ ) {
+                if ( m.face->hasAxis(var_settings[i].tag) )
+                    m.computed_variations.set(var_settings[i].tag,
+                        m.face->clampToAxis(var_settings[i].tag, var_settings[i].value));
+            }
+        }
+
         // 2. Build instance cache key.
         int face_size = size;
         if (m.face->css_family == css_ff_monospace && GetMonospaceSizeScale() != 100)
@@ -8070,6 +8174,7 @@ public:
         key.requested_italic = italic;
         key.computed_variations_hash = m.computed_variations.hash();
         key.feature_settings = featureSettings;
+        key.variation_settings = variationSettings;
 
         // 3. Return cached instance if available; otherwise load and cache.
         LVFontRef cached = _instance_cache.get(key);
@@ -8616,7 +8721,8 @@ public:
     virtual LVFontRef GetFont(int size, int weight, bool italic, css_font_family_t family, lString8 typeface,
                                 int features, int documentId, bool useBias=false,
                                 const LVFontVariations* /*variations*/=NULL, int /*docFragmentIdx*/=-1,
-                                const lString8 & /*featureSettings*/=lString8::empty_str)
+                                const lString8 & /*featureSettings*/=lString8::empty_str,
+                                const lString8 & /*variationSettings*/=lString8::empty_str)
     {
         LVFontDef * def = new LVFontDef(
             lString8::empty_str,
@@ -8750,7 +8856,8 @@ public:
     virtual LVFontRef GetFont(int size, int weight, bool bitalic, css_font_family_t family, lString8 typeface,
                                 int features=0, int documentId=-1, bool useBias=false,
                                 const LVFontVariations* /*variations*/=NULL, int /*docFragmentIdx*/=-1,
-                                const lString8 & /*featureSettings*/=lString8::empty_str)
+                                const lString8 & /*featureSettings*/=lString8::empty_str,
+                                const lString8 & /*variationSettings*/=lString8::empty_str)
     {
         int italic = bitalic?1:0;
         if (size<8)

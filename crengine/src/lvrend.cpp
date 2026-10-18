@@ -2381,7 +2381,8 @@ bool isSameFontStyle( css_style_rec_t * style1, css_style_rec_t * style2 )
         && (style1->font_name == style2->font_name)
         && (style1->font_weight == style2->font_weight)
         && (style1->font_width == style2->font_width)
-        && (style1->font_feature_settings == style2->font_feature_settings);
+        && (style1->font_feature_settings == style2->font_feature_settings)
+        && (style1->font_variation_settings == style2->font_variation_settings);
 }
 
 static int rend_font_base_weight = 400;
@@ -2462,7 +2463,8 @@ LVFontRef getFont(ldomNode * node, css_style_rec_t * style, int documentId, int 
         variations.empty() ? NULL : &variations,
         docFragmentIdx,
         // "normal" means no extra features (passed as an empty string)
-        style->font_feature_settings == "normal" ? lString8::empty_str : style->font_feature_settings);
+        style->font_feature_settings == "normal" ? lString8::empty_str : style->font_feature_settings,
+        style->font_variation_settings == "normal" ? lString8::empty_str : style->font_variation_settings);
     //fnt = LVCreateFontTransform( fnt, LVFONT_TRANSFORM_EMBOLDEN );
     return fnt;
 }
@@ -4820,6 +4822,7 @@ void copystyle( css_style_ref_t source, css_style_ref_t dest )
     dest->font_features.type = source->font_features.type ;
     dest->font_features.value = source->font_features.value ;
     dest->font_feature_settings = source->font_feature_settings ;
+    dest->font_variation_settings = source->font_variation_settings ;
     dest->text_indent = source->text_indent ;
     dest->line_height = source->line_height ;
     dest->width = source->width ;
@@ -10994,6 +10997,10 @@ void setNodeStyle( ldomNode * enode, css_style_ref_t parent_style, LVFontRef par
     // An empty string means "not set on this node", while "normal" resets.
     if ( pstyle->font_feature_settings.empty() ) {
         pstyle->font_feature_settings = parent_style->font_feature_settings;
+    }
+    // Same for font-variation-settings.
+    if ( pstyle->font_variation_settings.empty() ) {
+        pstyle->font_variation_settings = parent_style->font_variation_settings;
     }
 
     // cr_hint is also a bitmap, and only some bits are inherited.
