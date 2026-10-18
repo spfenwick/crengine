@@ -20,6 +20,8 @@ FONTS_ROOT = os.path.join(os.path.dirname(__file__),
 EMBEDDED_FONTS = {
     # CH10: the same file declared under two @font-face family names.
     "fonts/mono.ttf": "droid/DroidSansMono.ttf",
+    # CH12: has salt/ss04 (serifed I and J) and onum alternates.
+    "fonts/notosans.ttf": "noto/NotoSans-Regular.ttf",
 }
 
 CONTAINER_XML = """\
@@ -56,7 +58,9 @@ CONTENT_OPF = """\
     <item id="ch09"    href="ch09.html"    media-type="application/xhtml+xml"/>
     <item id="ch10"    href="ch10.html"    media-type="application/xhtml+xml"/>
     <item id="ch11"    href="ch11.html"    media-type="application/xhtml+xml"/>
+    <item id="ch12"    href="ch12.html"    media-type="application/xhtml+xml"/>
     <item id="font-mono" href="fonts/mono.ttf" media-type="font/ttf"/>
+    <item id="font-notosans" href="fonts/notosans.ttf" media-type="font/ttf"/>
     <item id="padding" href="padding.bin"  media-type="application/octet-stream"/>
   </manifest>
   <spine toc="ncx">
@@ -71,6 +75,7 @@ CONTENT_OPF = """\
     <itemref idref="ch09"/>
     <itemref idref="ch10"/>
     <itemref idref="ch11"/>
+    <itemref idref="ch12"/>
   </spine>
 </package>
 """
@@ -126,6 +131,10 @@ TOC_NCX = """\
     <navPoint id="ch11" playOrder="11">
       <navLabel><text>11. SVG Text Rendering</text></navLabel>
       <content src="ch11.html"/>
+    </navPoint>
+    <navPoint id="ch12" playOrder="12">
+      <navLabel><text>12. Font Feature Settings</text></navLabel>
+      <content src="ch12.html"/>
     </navPoint>
   </navMap>
 </ncx>
@@ -1033,6 +1042,114 @@ for broader coverage beyond these synthetic samples.</p>
 </html>
 """
 
+CH12 = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.1//EN"
+  "http://www.w3.org/TR/xhtml11/DTD/xhtml11.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en">
+<head><title>Font Feature Settings</title>
+<link rel="stylesheet" type="text/css" href="style.css"/>
+<style type="text/css">
+@font-face {
+  font-family: "FFSNoto";
+  src: url("fonts/notosans.ttf");
+}
+/* Google Sans Flex is bundled with KOReader: ss01 = single-storey a,
+   ss02 = double-storey g (closed lower loop). */
+.gsf   { font-family: "Google Sans Flex", sans-serif; font-size: 1.4em; }
+.noto  { font-family: "FFSNoto", sans-serif; font-size: 1.4em; }
+
+.ss01      { font-feature-settings: "ss01"; }
+.ss02      { font-feature-settings: "ss02"; }
+.ss01ss02  { font-feature-settings: "ss01", "ss02"; }
+.ss02ss01  { font-feature-settings: 'ss02' on, "ss01" 1; }
+.ss01off   { font-feature-settings: "ss01" off; }
+.lastwins  { font-feature-settings: "ss01" on, "ss01" off; }
+.ffsnormal { font-feature-settings: normal; }
+.ffsinherit { font-feature-settings: inherit; }
+.invalid   { font-feature-settings: "ss01"; font-feature-settings: "ss2", "ss02"; }
+.invalid2  { font-feature-settings: "ss01"; font-feature-settings: ss02; }
+.invalid3  { font-feature-settings: "ss01"; font-feature-settings: "ss02" -1; }
+.imp       { font-feature-settings: "ss01" !important; }
+
+.salt      { font-feature-settings: "salt"; }
+.ss04      { font-feature-settings: "ss04"; }
+.onum      { font-variant-numeric: oldstyle-nums; }
+.onum-off  { font-variant-numeric: oldstyle-nums; font-feature-settings: "onum" 0; }
+</style>
+</head>
+<body>
+<h1>Chapter 12 &#x2014; Font Feature Settings</h1>
+<p>CSS <code>font-feature-settings</code>, stored as a normalized string on
+the style and passed to HarfBuzz after the <code>font-variant</code> features.
+Needs the HarfBuzz (full) kerning mode: with "HarfBuzz light" or no
+HarfBuzz, every line below looks like its baseline.</p>
+
+<h2>Stylistic sets (Google Sans Flex)</h2>
+<p class="label">Baseline: no features (two-storey a, single-storey g with open tail)</p>
+<p class="sample gsf">a g &#x2014; banana gaggle</p>
+<p class="label">"ss01": single-storey a, g unchanged</p>
+<p class="sample gsf ss01">a g &#x2014; banana gaggle</p>
+<p class="label">"ss02": double-storey g with closed lower loop, a unchanged</p>
+<p class="sample gsf ss02">a g &#x2014; banana gaggle</p>
+<p class="label">"ss01", "ss02": single-storey a and double-storey g</p>
+<p class="sample gsf ss01ss02">a g &#x2014; banana gaggle</p>
+<p class="label">'ss02' on, "ss01" 1 (other order and syntax): same as the line above</p>
+<p class="sample gsf ss02ss01">a g &#x2014; banana gaggle</p>
+
+<h2>Values</h2>
+<p class="label">"ss01" off: like baseline</p>
+<p class="sample gsf ss01off">a g &#x2014; banana gaggle</p>
+<p class="label">"ss01" on, "ss01" off (last one wins): like baseline</p>
+<p class="sample gsf lastwins">a g &#x2014; banana gaggle</p>
+
+<h2>Inheritance (whole value, not merged)</h2>
+<div class="gsf ss01">
+<p class="label">Parent "ss01", text directly in it: single-storey a</p>
+<p class="sample">a g &#x2014; banana gaggle</p>
+<p class="label">Child span "ss02": replaces the parent's value, so a goes back to two-storey and g is double-storey</p>
+<p class="sample"><span class="ss02">a g &#x2014; banana gaggle</span></p>
+<p class="label">Child span "normal": like baseline</p>
+<p class="sample"><span class="ffsnormal">a g &#x2014; banana gaggle</span></p>
+<p class="label">Grandchild "inherit" under a "normal" span: like baseline</p>
+<p class="sample"><span class="ffsnormal"><span class="ffsinherit">a g &#x2014; banana gaggle</span></span></p>
+</div>
+
+<h2>Invalid declarations are dropped</h2>
+<p class="label">"ss01" then "ss2", "ss02" (3-char tag): second declaration dropped, only single-storey a</p>
+<p class="sample gsf invalid">a g &#x2014; banana gaggle</p>
+<p class="label">"ss01" then ss02 (unquoted): second declaration dropped, only single-storey a</p>
+<p class="sample gsf invalid2">a g &#x2014; banana gaggle</p>
+<p class="label">"ss01" then "ss02" -1 (negative value): second declaration dropped, only single-storey a</p>
+<p class="sample gsf invalid3">a g &#x2014; banana gaggle</p>
+
+<h2>!important</h2>
+<p class="label">Class "ss01" !important, inline style "normal": single-storey a</p>
+<p class="sample gsf imp" style="font-feature-settings: normal">a g &#x2014; banana gaggle</p>
+
+<h2>Stylistic alternates (embedded Noto Sans)</h2>
+<p class="label">Baseline: plain I and J</p>
+<p class="sample noto">I J &#x2014; Illinois Jill 1 l I</p>
+<p class="label">"salt": serifed I and J</p>
+<p class="sample noto salt">I J &#x2014; Illinois Jill 1 l I</p>
+<p class="label">"ss04": serifed I and J (same alternates as salt in this font)</p>
+<p class="sample noto ss04">I J &#x2014; Illinois Jill 1 l I</p>
+
+<h2>Overriding font-variant</h2>
+<p class="label">font-variant-numeric: oldstyle-nums: old-style figures</p>
+<p class="sample noto onum">0123456789</p>
+<p class="label">... plus font-feature-settings: "onum" 0: lining figures (font-feature-settings wins)</p>
+<p class="sample noto onum-off">0123456789</p>
+
+<h2>Expected behaviour</h2>
+<p>Each line should match its label. If every line looks like its baseline,
+check the kerning mode first (it must be HarfBuzz). If the "ss02" child in
+the inheritance section shows a single-storey a, values are being merged with
+the parent's instead of replaced.</p>
+</body>
+</html>
+"""
+
 # ---------------------------------------------------------------------------
 # Padding
 # ---------------------------------------------------------------------------
@@ -1080,6 +1197,7 @@ def build_epub(path):
         zf.writestr("OEBPS/ch09.html",        CH09)
         zf.writestr("OEBPS/ch10.html",        CH10)
         zf.writestr("OEBPS/ch11.html",        CH11)
+        zf.writestr("OEBPS/ch12.html",        CH12)
         for dest, data in font_data.items():
             zf.writestr("OEBPS/" + dest, data)
         zf.writestr(zipfile.ZipInfo("OEBPS/padding.bin"), PADDING,

@@ -67,7 +67,9 @@ enum css_decl_code {
     cssd_font_weight,
     cssd_font_width,
     cssd_font_width2,             // font-stretch, legacy name of font-width
-    cssd_font_features,           // font-feature-settings (not yet parsed)
+    cssd_font_features,           // font-feature-settings (parsed into cssd_font_feature_settings_str);
+                                  // also the internal code for the font-variant bitmap records
+    cssd_font_feature_settings_str, // normalized font-feature-settings string
     cssd_font_optical_sizing,
     cssd_font_variant,            // all these are parsed specifically and mapped into
     cssd_font_variant_ligatures,  // the same style->font_features 31 bits bitmap
@@ -189,6 +191,7 @@ static const char * css_decl_name[] = {
     "font-width",
     "font-stretch", // legacy name of font-width
     "font-feature-settings",
+    "$dummy-for-font-feature-settings$",
     "font-optical-sizing",
     "font-variant",
     "font-variant-ligatures",
@@ -646,6 +649,95 @@ static bool parse_integer( const char * & str, unsigned & value)
         value = value*10 + (*str - '0');
         str++;
     }
+    return true;
+}
+
+// Parse a CSS font-feature-settings value list (after "normal" and global
+// keywords have been handled), like:  "ss01", "ss03" on, "salt" 0, "cv05" 2
+// On success, out is set to a normalized "tttt=N,tttt=N,..." string, sorted
+// by tag with duplicates removed (the last one wins), and decl is left on
+// the declaration end (or on a "!important"). Tags are exactly 4 printable
+// ASCII chars (possibly ',' or '=', so consumers must not split on these).
+// As per specs, any invalid item makes the whole declaration invalid.
+#define MAX_FONT_FEATURE_SETTINGS 16
+static bool parse_font_feature_settings( const char * & decl, char stop_char, lString8 & out )
+{
+    struct feature_item { char tag[4]; unsigned value; };
+    feature_item items[MAX_FONT_FEATURE_SETTINGS];
+    int nb_items = 0;
+    const char * str = decl;
+    for (;;) {
+        skip_spaces( str );
+        char quote = *str;
+        if ( quote != '"' && quote != '\'' )
+            return false;
+        str++;
+        char tag[4];
+        for ( int i=0; i<4; i++ ) {
+            if ( str[i] < 0x20 || str[i] > 0x7E || str[i] == quote || str[i] == '\\' )
+                return false; // also catches a too short tag or a premature end
+            tag[i] = str[i];
+        }
+        if ( str[4] != quote )
+            return false; // too long tag
+        str += 5;
+        skip_spaces( str );
+        unsigned value = 1; // "tttt" alone means on
+        if ( substr_icompare("on", str) ) {
+            value = 1;
+        }
+        else if ( substr_icompare("off", str) ) {
+            value = 0;
+        }
+        else if ( *str >= '0' && *str <= '9' ) {
+            value = 0;
+            while ( *str >= '0' && *str <= '9' ) {
+                if ( value < 1000000 ) // clamp absurd values, avoid overflow
+                    value = value*10 + (*str - '0');
+                str++;
+            }
+        }
+        // Store it (replacing any previous same tag, as the last one wins)
+        int idx = 0;
+        while ( idx < nb_items && memcmp(items[idx].tag, tag, 4) != 0 )
+            idx++;
+        if ( idx < nb_items ) {
+            items[idx].value = value;
+        }
+        else if ( nb_items < MAX_FONT_FEATURE_SETTINGS ) {
+            memcpy(items[nb_items].tag, tag, 4);
+            items[nb_items].value = value;
+            nb_items++;
+        }
+        else {
+            CRLog::warn("font-feature-settings: more than %d features, ignoring '%.4s'", MAX_FONT_FEATURE_SETTINGS, tag);
+        }
+        skip_spaces( str );
+        if ( *str == ',' ) {
+            str++;
+            continue;
+        }
+        if ( *str == 0 || *str == ';' || *str == stop_char || *str == '!' )
+            break;
+        return false; // garbage after an item
+    }
+    // Sort by tag (insertion sort, few items), so equivalent declarations
+    // give the same string and allow sharing styles and fonts.
+    for ( int i=1; i<nb_items; i++ ) {
+        for ( int j=i; j>0 && memcmp(items[j-1].tag, items[j].tag, 4) > 0; j-- ) {
+            feature_item tmp = items[j];
+            items[j] = items[j-1];
+            items[j-1] = tmp;
+        }
+    }
+    out.clear();
+    for ( int i=0; i<nb_items; i++ ) {
+        if ( i > 0 )
+            out << ',';
+        out.append(items[i].tag, 4);
+        out << '=' << lString8::itoa(items[i].value);
+    }
+    decl = str;
     return true;
 }
 
@@ -4418,19 +4510,33 @@ bool LVCssDeclaration::parse( const char * &decl, bool higher_importance, lxmlDo
                 n = parse_name( decl, css_fos_names, -1 );
                 break;
             case cssd_font_features: // font-feature-settings
-                // Not (yet) implemented.
-                // We map font-variant(|-*) values into the style->font_features bitmap,
-                // that is associated to cssd_font_features, as "font-feature-settings" looks
-                // nearer (than font-variant) to how we handle internally OpenType feature tags.
-                // But font-variant and font-feature-settings, even if they enable the same
-                // OpenType feature tags, should have each a life (inheritance) of their own,
-                // which we won't really ensure by mapping all of them into style->font_features.
-                // Also, font-feature-settings is quite more complicated to parse (optional
-                // arguments, 0|1|2|3|on|off...), and we would only support up to the 31 tags
-                // that can be stored in the bitmap, so ignoring all possible others.
-                // As font-feature-settings is quite new, let's not support it (quite
-                // often, publishers will include both font-variant and font-feature-settings
-                // in a same declaration, so we should be fine).
+                // https://drafts.csswg.org/css-fonts-4/#font-feature-settings-prop
+                // Stored as a normalized string in style->font_feature_settings (and not
+                // in the style->font_features bitmap that font-variant(|-*) use), so we
+                // support any OpenType feature tag (ss01..ss20, cv01..cv99, salt, swsh...).
+                // An empty string means "inherit", "normal" means no feature.
+                // Applied after (so, overriding) the font-variant ones, as per specs.
+                {
+                    lString8 settings;
+                    bool valid = true;
+                    if ( g >= 0 ) {
+                        if ( g == css_g_initial )
+                            settings = "normal";
+                        // else: inherit/unset (inherited property): empty string
+                    }
+                    else if ( substr_icompare("normal", decl) ) {
+                        settings = "normal";
+                    }
+                    else {
+                        valid = parse_font_feature_settings( decl, stop_char, settings );
+                    }
+                    if ( valid ) {
+                        buf<<(lUInt32) (cssd_font_feature_settings_str | importance | parse_important(decl));
+                        buf<<(lUInt32) settings.length();
+                        for (int i=0; i < settings.length(); i++)
+                            buf<<(lUInt32) (lUInt8) settings[i];
+                    }
+                }
                 break;
             case cssd_font_variant:
             case cssd_font_variant_ligatures:
@@ -5989,6 +6095,18 @@ void LVCssDeclaration::apply( css_style_rec_t * style, const ldomNode * node ) c
         case cssd_font_width:
             style->Apply( (lUInt16) *p++, &style->font_width, imp_bit_font_width, is_important );
             style->flags |= STYLE_REC_FLAG_INHERITABLE_APPLIED;
+            break;
+        case cssd_font_feature_settings_str:
+            {
+                lString8 settings;
+                int len = *p++;
+                settings.reserve(len);
+                for (int i=0; i<len; i++)
+                    settings << (lChar8)(*p++);
+                settings.pack();
+                style->Apply( settings, &style->font_feature_settings, imp_bit_font_feature_settings, is_important );
+                style->flags |= STYLE_REC_FLAG_INHERITABLE_APPLIED;
+            }
             break;
         case cssd_font_optical_sizing:
             style->Apply( (css_font_optical_sizing_t) *p++, &style->font_optical_sizing, imp_bit_font_optical_sizing, is_important );

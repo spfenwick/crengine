@@ -32,6 +32,7 @@ lUInt32 calcHash(font_ref_t & f)
     v = v * 31 + (lUInt32)f->getWeight();
     v = v * 31 + (lUInt32)f->getItalic();
     v = v * 31 + (lUInt32)f->getFeatures();
+    v = v * 31 + (lUInt32)f->getFeatureSettings().getHash();
     v = v * 31 + (lUInt32)f->getKerningMode();
     // No more needed since hinting mode does not change advances
     // v = v * 31 + (lUInt32)f->getHintingMode();
@@ -75,6 +76,7 @@ lUInt32 calcHash(css_style_rec_t & rec)
     v = v * 31 + (lUInt32)rec.font_weight;
     v = v * 31 + (lUInt32)rec.font_width;
     v = v * 31 + (lUInt32)rec.font_features.pack();
+    v = v * 31 + (lUInt32)rec.font_feature_settings.getHash();
     v = v * 31 + (lUInt32)rec.font_optical_sizing;
     v = v * 31 + (lUInt32)rec.line_height.pack();
     v = v * 31 + (lUInt32)rec.color.pack();
@@ -192,6 +194,7 @@ bool operator == (const css_style_rec_t & r1, const css_style_rec_t & r2)
            r1.font_name == r2.font_name &&
            r1.font_family == r2.font_family&&
            r1.font_features == r2.font_features&&
+           r1.font_feature_settings == r2.font_feature_settings &&
            r1.font_optical_sizing == r2.font_optical_sizing&&
            r1.border_style_top==r2.border_style_top&&
            r1.border_style_right==r2.border_style_right&&
@@ -395,6 +398,7 @@ bool css_style_rec_t::serialize( SerialBuf & buf )
     ST_PUT_U16(font_weight);        //    lUInt16              font_weight;
     ST_PUT_U16(font_width);         //    lUInt16              font_width;
     ST_PUT_LEN(font_features);      //    css_length_t         font_features;
+    buf << font_feature_settings;   //    lString8             font_feature_settings;
     ST_PUT_ENUM(font_optical_sizing);
     ST_PUT_LEN(text_indent);        //    css_length_t         text_indent;
     ST_PUT_LEN(line_height);        //    css_length_t         line_height;
@@ -476,6 +480,7 @@ bool css_style_rec_t::deserialize( SerialBuf & buf )
     ST_GET_U16(lUInt16, font_weight);
     ST_GET_U16(lUInt16, font_width);
     ST_GET_LEN(font_features);                              //    css_length_t         font_features;
+    buf >> font_feature_settings;                           //    lString8             font_feature_settings;
     ST_GET_ENUM(css_font_optical_sizing_t, font_optical_sizing);
     ST_GET_LEN(text_indent);                                //    css_length_t         text_indent;
     ST_GET_LEN(line_height);                                //    css_length_t         line_height;

@@ -1675,6 +1675,7 @@ protected:
     FT_Pos         _synth_weight_strength; // for emboldening with FT_Outline_Embolden()
     FT_Pos         _synth_weight_half_strength;
     int            _features; // requested OpenType features bitmap
+    lString8       _feature_settings; // CSS font-feature-settings, normalized "tag=value,..."
     LVFontVariations _variations; // variable font axis values applied to this instance
 #if USE_HARFBUZZ==1
     hb_font_t* _hb_font;
@@ -1777,7 +1778,8 @@ public:
         if ( other_font->getSize() == other_adjusted_size )
             return other_font;
         return fontMan->GetFont(other_adjusted_size, other_font->getWeight(), other_font->getItalic()!=0,
-                            other_font->getFontFamily(), other_font->getTypeFace(), other_font->getFeatures(), -1);
+                            other_font->getFontFamily(), other_font->getTypeFace(), other_font->getFeatures(), -1,
+                            false, NULL, -1, other_font->getFeatureSettings());
     }
 
     int getXHeight() {
@@ -1839,7 +1841,7 @@ public:
                 getFontFamily(),
                 getTypeFace(),
                 getFeatures() | LFNT_OT_FEATURES_P_TNUM,
-                -1, false);
+                -1, false, NULL, -1, getFeatureSettings());
             if ( _DecimalListItemFont.isNull() ) // shouldn't happen
                 _DecimalListItemFont = LVFontRef(this);
         }
@@ -2113,6 +2115,28 @@ public:
             if ( _features & LFNT_OT_FEATURES_P_JP83 ) { addHBFeature("+jp83"); }
             if ( _features & LFNT_OT_FEATURES_P_JP04 ) { addHBFeature("+jp04"); }
         }
+        // CSS font-feature-settings, added last so they override font-variant ones.
+        // Format (see lvstsheet.cpp parse_font_feature_settings()): "tttt=N,tttt=N,..."
+        // with exactly 4 chars per tag, which may themselves be ',' or '=' (so we
+        // don't split on them, nor use hb_feature_from_string()).
+        if ( !_feature_settings.empty() ) {
+            const char * p = _feature_settings.c_str();
+            const char * end = p + _feature_settings.length();
+            while ( end - p >= 6 && p[4] == '=' ) {
+                hb_feature_t hb_feature;
+                hb_feature.tag = HB_TAG(p[0], p[1], p[2], p[3]);
+                hb_feature.start = HB_FEATURE_GLOBAL_START;
+                hb_feature.end = HB_FEATURE_GLOBAL_END;
+                p += 5;
+                unsigned int value = 0;
+                while ( p < end && *p >= '0' && *p <= '9' )
+                    value = value * 10 + (*p++ - '0');
+                hb_feature.value = value;
+                _hb_features.add(hb_feature);
+                if ( p < end && *p == ',' )
+                    p++;
+            }
+        }
     }
     #endif
 
@@ -2122,6 +2146,14 @@ public:
     }
     virtual int getFeatures() const {
         return _features;
+    }
+    virtual void setFeatureSettings( const lString8 & settings ) {
+        _feature_settings = settings;
+        _hash = 0; // Force lvstyles.cpp calcHash(font_ref_t) to recompute the hash
+        // (no setupHBFeatures() here: the followup setKerningMode() takes care of it)
+    }
+    virtual lString8 getFeatureSettings() const {
+        return _feature_settings;
     }
     void setVariations( const LVFontVariations& variations ) {
         _variations = variations;
@@ -5351,6 +5383,8 @@ public:
     virtual void setBitmapMode(bool m)        { _font->setBitmapMode(m); }
     virtual int  getFeatures() const          { return _font->getFeatures(); }
     virtual void setFeatures(int f)           { _font->setFeatures(f); }
+    virtual lString8 getFeatureSettings() const          { return _font->getFeatureSettings(); }
+    virtual void setFeatureSettings(const lString8 & fs) { _font->setFeatureSettings(fs); }
     virtual lUInt32 getVariationHash() const  { return _font->getVariationHash(); }
     virtual int getSynthWeight() const        { return _font->getSynthWeight(); }
     virtual void setKerningMode(kerning_mode_t m)  { _font->setKerningMode(m); }
@@ -6729,6 +6763,7 @@ struct LVFontInstanceKey {
     int     requested_weight;  // CSS-requested weight (e.g. 700); loadAndCache() synthesizes bold if face's wght axis differs
     bool    requested_italic;  // CSS-requested italic; loadAndCache() synthesizes italic if face.is_italic differs
     lUInt32 computed_variations_hash;   // LVFontVariations::hash() of computed axis values
+    lString8 feature_settings; // CSS font-feature-settings (full string, to avoid collisions)
 
     bool operator==(const LVFontInstanceKey& o) const {
         return face_id         == o.face_id
@@ -6737,7 +6772,8 @@ struct LVFontInstanceKey {
             && features        == o.features
             && requested_weight == o.requested_weight
             && requested_italic == o.requested_italic
-            && computed_variations_hash == o.computed_variations_hash;
+            && computed_variations_hash == o.computed_variations_hash
+            && feature_settings == o.feature_settings;
     }
     lUInt32 hash() const {
         lUInt32 h = face_id;
@@ -6747,6 +6783,7 @@ struct LVFontInstanceKey {
         h = h * 31 + (lUInt32)(unsigned)requested_weight;
         h = h * 31 + ((lUInt32)requested_italic);
         h = h * 31 + computed_variations_hash;
+        h = h * 31 + feature_settings.getHash();
         return h;
     }
 };
@@ -7900,6 +7937,7 @@ public:
     }
 
     /// Load a font face, apply synthesis, cache the instance, and return it.
+    /// (CSS font-feature-settings are taken from key.feature_settings.)
     LVFontRef loadAndCache(const LVFontFace& face, int size, int face_size,
                             int weight, bool italic,
                             int features, const LVFontVariations& computed_variations,
@@ -7946,6 +7984,7 @@ public:
 
         LVFontRef ref(font);
         font->setFeatures(features);
+        font->setFeatureSettings(key.feature_settings); // followup setKerningMode() sets up hb_features
         font->setKerningMode(GetKerningMode());
         font->setFaceName(face.typeface);
 
@@ -7983,7 +8022,8 @@ public:
             LVFontRef smallRef = GetFont(small_size, small_weight, italic,
                                          face.css_family, face.typeface,
                                          features & ~(LFNT_OT_FEATURES_P_SMCP | LFNT_OT_FEATURES_P_C2SC),
-                                         face.documentId, false, smallVars.empty() ? NULL : &smallVars);
+                                         face.documentId, false, smallVars.empty() ? NULL : &smallVars,
+                                         -1, key.feature_settings);
             if (!smallRef.isNull())
                 ref = LVFontRef(new LVFontSmallCapsTransform(ref, smallRef,
                                     (features & LFNT_OT_FEATURES_P_C2SC) != 0));
@@ -7995,7 +8035,8 @@ public:
 
     virtual LVFontRef GetFont(int size, int weight, bool italic, css_font_family_t css_family, lString8 typeface,
                                 int features, int documentId, bool useBias=false,
-                                const LVFontVariations* variations=NULL, int docFragmentIdx = -1)
+                                const LVFontVariations* variations=NULL, int docFragmentIdx = -1,
+                                const lString8 & featureSettings = lString8::empty_str)
     {
         FONT_MAN_GUARD
 
@@ -8028,6 +8069,7 @@ public:
         key.requested_weight = weight;
         key.requested_italic = italic;
         key.computed_variations_hash = m.computed_variations.hash();
+        key.feature_settings = featureSettings;
 
         // 3. Return cached instance if available; otherwise load and cache.
         LVFontRef cached = _instance_cache.get(key);
@@ -8573,7 +8615,8 @@ public:
     }
     virtual LVFontRef GetFont(int size, int weight, bool italic, css_font_family_t family, lString8 typeface,
                                 int features, int documentId, bool useBias=false,
-                                const LVFontVariations* /*variations*/=NULL, int /*docFragmentIdx*/=-1)
+                                const LVFontVariations* /*variations*/=NULL, int /*docFragmentIdx*/=-1,
+                                const lString8 & /*featureSettings*/=lString8::empty_str)
     {
         LVFontDef * def = new LVFontDef(
             lString8::empty_str,
@@ -8706,7 +8749,8 @@ public:
     }
     virtual LVFontRef GetFont(int size, int weight, bool bitalic, css_font_family_t family, lString8 typeface,
                                 int features=0, int documentId=-1, bool useBias=false,
-                                const LVFontVariations* /*variations*/=NULL, int /*docFragmentIdx*/=-1)
+                                const LVFontVariations* /*variations*/=NULL, int /*docFragmentIdx*/=-1,
+                                const lString8 & /*featureSettings*/=lString8::empty_str)
     {
         int italic = bitalic?1:0;
         if (size<8)

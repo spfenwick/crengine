@@ -2380,7 +2380,8 @@ bool isSameFontStyle( css_style_rec_t * style1, css_style_rec_t * style2 )
         && (style1->font_style == style2->font_style)
         && (style1->font_name == style2->font_name)
         && (style1->font_weight == style2->font_weight)
-        && (style1->font_width == style2->font_width);
+        && (style1->font_width == style2->font_width)
+        && (style1->font_feature_settings == style2->font_feature_settings);
 }
 
 static int rend_font_base_weight = 400;
@@ -2459,7 +2460,9 @@ LVFontRef getFont(ldomNode * node, css_style_rec_t * style, int documentId, int 
         style->font_features.value, // (.type is always css_val_unspecified after setNodeStyle())
         documentId, true, // useBias=true, so that our preferred font gets used
         variations.empty() ? NULL : &variations,
-        docFragmentIdx);
+        docFragmentIdx,
+        // "normal" means no extra features (passed as an empty string)
+        style->font_feature_settings == "normal" ? lString8::empty_str : style->font_feature_settings);
     //fnt = LVCreateFontTransform( fnt, LVFONT_TRANSFORM_EMBOLDEN );
     return fnt;
 }
@@ -4816,6 +4819,7 @@ void copystyle( css_style_ref_t source, css_style_ref_t dest )
     dest->font_width = source->font_width ;
     dest->font_features.type = source->font_features.type ;
     dest->font_features.value = source->font_features.value ;
+    dest->font_feature_settings = source->font_feature_settings ;
     dest->text_indent = source->text_indent ;
     dest->line_height = source->line_height ;
     dest->width = source->width ;
@@ -10961,7 +10965,7 @@ void setNodeStyle( ldomNode * enode, css_style_ref_t parent_style, LVFontRef par
         pstyle->font_name = parent_font.get()->getTypeFace();
     }
 
-    // font_features (font-variant/font-feature-settings)
+    // font_features (font-variant(|-*), font-feature-settings is handled below)
     // The specs say a font-variant resets the ones that would be
     // inherited (as inheritance always does).
     // But, as we store in a single bitmap the values from multiple
@@ -10983,6 +10987,13 @@ void setNodeStyle( ldomNode * enode, css_style_ref_t parent_style, LVFontRef par
     if ( pstyle->font_features.type == css_val_inherited || pstyle->font_features.value != 0 ) {
         pstyle->font_features.value |= parent_style->font_features.value;
         pstyle->font_features.type = css_val_unspecified;
+    }
+
+    // font-feature-settings: inherited as a whole (unlike font_features above, the
+    // value from the nearest node that sets it replaces any upper one, as per specs).
+    // An empty string means "not set on this node", while "normal" resets.
+    if ( pstyle->font_feature_settings.empty() ) {
+        pstyle->font_feature_settings = parent_style->font_feature_settings;
     }
 
     // cr_hint is also a bitmap, and only some bits are inherited.
