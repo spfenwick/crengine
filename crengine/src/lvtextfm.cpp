@@ -5345,7 +5345,8 @@ public:
                             const std::vector<bool> & hyphenation,
                             std::vector<OptimalLineBreak> & result,
                             bool allow_hyphens, int tolerance,
-                            bool allow_emergency_stretch) {
+                            bool allow_emergency_stretch,
+                            bool unlimited_stretch=false) {
 
         std::vector<OptimalBreakCandidate> candidates;
         candidates.reserve(m_length / 2 + 8);
@@ -5666,7 +5667,7 @@ public:
                     int emergency = target_width *
                             m_pbuffer->justify_emergency_stretch_percent / 100;
                     emergency_excess = diff - maximum_adjustment;
-                    if ( emergency_excess > emergency )
+                    if ( emergency_excess > emergency && !unlimited_stretch )
                         continue;
                     capacity = std::max(capacity,
                             maximum_adjustment + emergency);
@@ -5753,16 +5754,21 @@ public:
                         line_cost += m_pbuffer->justify_final_hyphen_demerits;
                 }
                 if ( ragged_final ) {
-                    // A very short paragraph ending is visually conspicuous,
-                    // but this bounded preference must never buy a wrecked
-                    // body line. The traditional target is one third of the
-                    // measure.
+                    // A very short paragraph ending is visually conspicuous.
+                    // The cost grows with the square of the shortfall, so a
+                    // nearly long enough ending costs little and a stub costs
+                    // as much as several loose lines. It only chooses among
+                    // layouts whose lines are within tolerance. (A flat cost
+                    // of 5000-10000 was too weak to change most paragraphs,
+                    // and above about 33% charged almost every ending the
+                    // same, so the setting had no visible effect.)
                     int preferred = target_width *
                             m_pbuffer->justify_last_line_min_percent / 100;
                     if ( natural_width < preferred ) {
-                        int deficit = preferred - natural_width;
-                        line_cost += 5000 +
-                                (long long)5000 * deficit / std::max(1, preferred);
+                        double shortfall = (double)(preferred - natural_width) /
+                                preferred;
+                        line_cost += (long long)(1000000.0 *
+                                shortfall * shortfall);
                     }
                 }
                 int prior_last = previous < 0 ? 1 : 4;
@@ -5835,12 +5841,17 @@ public:
         findParagraphHyphenation(hyphenation);
         // Hyphens are included in the first pass (their cost is set by the
         // hyphen penalties); only emergency stretch is reserved for the
-        // fallback pass.
+        // fallback pass. Like TeX with tolerance 10000, a last pass accepts
+        // lines looser than the emergency stretch allows, so that one hard
+        // line does not send the whole paragraph back to greedy breaking
+        // (where none of the Knuth settings apply). Shrink limits stay hard.
         std::vector<OptimalLineBreak> breaks;
         bool found = buildOptimalBreaks(para, hyphenation, breaks, true,
                     m_pbuffer->justify_pretolerance, false) ||
                 buildOptimalBreaks(para, hyphenation, breaks, true,
-                    m_pbuffer->justify_tolerance, true);
+                    m_pbuffer->justify_tolerance, true) ||
+                buildOptimalBreaks(para, hyphenation, breaks, true,
+                    10000, true, true);
         if ( !found )
             return false;
 
