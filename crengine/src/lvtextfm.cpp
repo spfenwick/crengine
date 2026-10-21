@@ -18,6 +18,7 @@
 #include <string.h>
 #include "../include/lvfnt.h"
 #include "../include/lvtextfm.h"
+#include "../include/knuthparagraph.h"
 #include "../include/lvdrawbuf.h"
 #include "../include/fb2def.h"
 
@@ -182,6 +183,7 @@ formatted_text_fragment_t * lvtextAllocFormatter( lUInt16 width )
     pbuffer->min_space_condensing_percent = MIN_SPACE_CONDENSING_PERCENT; // 50%
     pbuffer->unused_space_threshold_percent = UNUSED_SPACE_THRESHOLD_PERCENT; // 5%
     pbuffer->max_added_letter_spacing_percent = MAX_ADDED_LETTER_SPACING_PERCENT; // 0%
+    pbuffer->knuth = KnuthJustifyConfig(); // greedy
     pbuffer->cjk_width_scale_percent = CJK_WIDTH_SCALE_PERCENT; // 100% (keep original width)
 
     return pbuffer;
@@ -456,6 +458,8 @@ public:
     bool m_has_bidi; // true when Bidi (or pure RTL) detected
     bool m_para_dir_is_rtl; // boolean shortcut of m_para_bidi_type
     bool m_has_cjk; // true when some CJK met
+    bool m_para_optimized; // true while lines of a Knuth-planned paragraph are being added
+    bool m_para_emergency_stretch; // the line being added was planned with emergency stretch
     int  m_cjk_prev_line_added_space_div; // Used with CJK justified lines, to
     int  m_cjk_prev_line_added_space_mod; // apply same spacing on last line.
     lUInt32 m_formatted_initial_letter_id;
@@ -520,6 +524,8 @@ public:
         m_initial_letter_exclusion.start_y = 0;
         m_initial_letter_exclusion.end_y = 0;
         m_has_cjk = false;
+        m_para_optimized = false;
+        m_para_emergency_stretch = false;
         m_cjk_prev_line_added_space_div = 0;
         m_cjk_prev_line_added_space_mod = 0;
         m_specified_para_dir = REND_DIRECTION_UNSET;
@@ -2963,7 +2969,7 @@ public:
                 prev_word->width += shift_x;
                 prev_word->min_width += shift_x;
                 // To see where correction is done, show some overline on the word (also uncomment it in LFormattedText::Draw())
-                // word->flags |= LTEXT_WORD__AVAILABLE_BIT_16__;
+                // word->flags |= LTEXT_WORD__AVAILABLE_BIT_16__; (now LTEXT_WORD_HAS_DISTRIBUTED_TRACKING: borrow it while debugging)
             }
             frmline->width += added_x;
             extra_width = usable_width - frmline->width;
@@ -2971,7 +2977,10 @@ public:
 
         // We might want to prevent this when LangCfg == "de" (in german,
         // letter spacing is used for emphasis)
-        if ( m_pbuffer->max_added_letter_spacing_percent > 0 // only if allowed
+        // Knuth-planned paragraphs have their own tracking; every other
+        // paragraph keeps the legacy letter spacing aid.
+        if ( !m_para_optimized &&
+                        m_pbuffer->max_added_letter_spacing_percent > 0 // only if allowed
                         && alignment == LTEXT_ALIGN_WIDTH    // only when justifying
                         && frmline->word_count > 1           // not if single word (expanded, but not taking the full width is ugly)
                         && 100 * extra_width > m_pbuffer->unused_space_threshold_percent * usable_width ) {
@@ -3093,6 +3102,21 @@ public:
         }
         extra_width = usable_width - frmline->width;
 
+        // Only lines whose breaks the Knuth planner chose: paragraphs it
+        // rejected were broken greedily, against the legacy space limits,
+        // and must be justified by the legacy code below. This includes
+        // lines without word spaces: the planner may have fitted them with
+        // tracking alone. (A planned paragraph has no CJK chars, even when
+        // an earlier paragraph of this block set m_has_cjk.)
+        bool optimized_adjustment = m_para_optimized &&
+                alignment == LTEXT_ALIGN_WIDTH && !m_has_bidi;
+        if ( optimized_adjustment ) {
+            knuthJustifyLine(frmline, extra_width, m_pbuffer,
+                             m_kerning_mode == KERNING_MODE_HARFBUZZ,
+                             m_para_emergency_stretch);
+            extra_width = usable_width - frmline->width;
+        }
+
         if ( m_has_cjk && extra_width < 0 && frmline->word_count > 1
                     && frmline->words[frmline->word_count-1].flags & LTEXT_WORD_IS_FLEXIBLE_WIDTH_CJK ) {
             // Line too wide (some space reduction is needed) and the last word is a flexible CJK.
@@ -3115,7 +3139,7 @@ public:
             }
         }
 
-        if ( extra_width < 0 ) {
+        if ( extra_width < 0 && !optimized_adjustment ) {
             // line is too wide
             // reduce spaces to fit line
             int extraSpace = -extra_width;
@@ -3217,7 +3241,7 @@ public:
                 m_cjk_prev_line_added_space_div = 0;
                 m_cjk_prev_line_added_space_mod = 0;
             }
-            if ( extra_width > 0 ) {
+            if ( extra_width > 0 && !optimized_adjustment ) {
                 // distribute additional space
                 int extraSpace = extra_width;
                 int addSpacePoints = 0;
@@ -3947,6 +3971,10 @@ public:
                 formatted_word_t * word = lvtextAddFormattedWord(frmline);
                 src_text_fragment_t * srcline = m_srcs[wstart]; // should be identical to lastSrc
                 word->src_text_index = srcline->index;
+                word->natural_space_width = 0;
+                word->distributed_tracking = 0;
+                word->distributed_tracking_start = 0;
+                word->distributed_tracking_points = 0;
 
                 // This LTEXT_VALIGN_ flag is now only of use with objects (images)
                 int vertical_align_flag = srcline->flags & LTEXT_VALIGN_MASK;
@@ -4410,6 +4438,8 @@ public:
                     bool preformatted = srcline->flags & LTEXT_FLAG_PREFORMATTED;
                     if ( m_flags[i-1] & LCHAR_IS_SPACE ) {
                         // Current word ends with a space.
+                        word->natural_space_width = m_widths[i-1] -
+                                (i > 1 ? m_widths[i-2] : 0);
                         // Each word ending with a space (except in some conditions) can
                         // have its width reduced by a fraction of this space width or
                         // increased if needed (for text justification), so actually
@@ -4955,6 +4985,104 @@ public:
 
     }
 
+    bool tryOptimizedParagraph(src_text_fragment_t * para,
+                               bool preFormattedOnly, bool isLastPara) {
+        if ( m_pbuffer->knuth.line_breaking_mode != 1 || preFormattedOnly || m_length < 1 )
+            return false;
+        if ( para->flags & LTEXT_LEGACY_RENDERING )
+            return false;
+        int align = para->flags & LTEXT_FLAG_NEWLINE;
+        if ( align != LTEXT_ALIGN_WIDTH ) {
+            // A ragged (left-aligned, right-aligned or centered) paragraph,
+            // unless its rag width is 0, or its last line is justified
+            // (its lines are planned with their natural spacing).
+            int last_align = (para->flags >> LTEXT_LAST_LINE_ALIGN_SHIFT) & LTEXT_FLAG_NEWLINE;
+            if ( m_pbuffer->knuth.ragged_width_percent == 0 ||
+                    align < LTEXT_ALIGN_LEFT || align > LTEXT_ALIGN_CENTER ||
+                    last_align == LTEXT_ALIGN_WIDTH )
+                return false;
+        }
+        // (m_has_cjk, m_has_images and m_has_inline_boxes stay set for the
+        // rest of the final block once met: knuthCanBreakParagraph() checks
+        // this paragraph's chars instead.)
+        if ( m_has_bidi || m_para_dir_is_rtl || m_has_float_to_position || m_has_ongoing_float ||
+                m_initial_letter_exclusion.active )
+            return false;
+        if ( m_has_inline_boxes ) {
+            // An initial letter narrows the lines beside it once its line
+            // is added, which the planner can't foresee.
+            for ( int i=0; i<m_length; i++ ) {
+                if ( (m_flags[i] & LCHAR_IS_OBJECT) && m_charindex[i] == INLINEBOX_CHAR_INDEX &&
+                        getInitialLetterInlineBoxPseudoElem((ldomNode *)m_srcs[i]->object) )
+                    return false;
+            }
+        }
+        // A changing width would invalidate paragraph-wide decisions. This also
+        // excludes outer floats that are not represented in this paragraph.
+        if ( getCurrentLineX() != 0 || getCurrentLineWidth() != m_pbuffer->width )
+            return false;
+        KnuthParagraph kpara;
+        kpara.text = m_text;
+        kpara.flags = m_flags;
+        kpara.widths = m_widths;
+        kpara.srcs = m_srcs;
+        kpara.charindex = m_charindex;
+        kpara.pad_char_index = PAD_CHAR_INDEX;
+        kpara.float_char_index = FLOAT_CHAR_INDEX;
+        kpara.length = m_length;
+        kpara.config = &m_pbuffer->knuth;
+        kpara.harfbuzz = m_kerning_mode == KERNING_MODE_HARFBUZZ;
+        kpara.hanging_punctuation = m_hanging_punctuation;
+        kpara.para_flags = para->flags;
+        if ( !knuthCanBreakParagraph(kpara) )
+            return false;
+        kpara.line_width = getCurrentLineWidth();
+        kpara.first_indent = m_indent_current;
+        kpara.following_indent = m_indent_first_line_done ? m_indent_current
+                                                          : m_indent_after_first_line;
+        getCurrentLineUsableOverflows(kpara.usable_left_overflow, kpara.usable_right_overflow);
+        std::vector<OptimalLineBreak> breaks;
+        if ( !knuthBreakParagraph(kpara, breaks) )
+            return false;
+
+        int pos = 0;
+        m_para_optimized = true;
+        for ( size_t i=0; i<breaks.size(); i++ ) {
+            int x = m_indent_current;
+            if ( !m_indent_first_line_done ) {
+                m_indent_first_line_done = true;
+                m_indent_current = m_indent_after_first_line;
+            }
+            int wrap_pos = breaks[i].pos;
+            lUInt16 saved_flags = m_flags[wrap_pos];
+            if ( breaks[i].hyphenated )
+                m_flags[wrap_pos] |= LCHAR_ALLOW_HYPH_WRAP_AFTER;
+            m_para_emergency_stretch = breaks[i].emergency_stretch;
+            // As the greedy code does: addLine() then positions the line's
+            // inline boxes (and never light-formats it).
+            bool hasInlineBoxes = false;
+            if ( m_has_inline_boxes ) {
+                for ( int k=pos; k<=wrap_pos && !hasInlineBoxes; k++ )
+                    hasInlineBoxes = (m_flags[k] & LCHAR_IS_OBJECT) && m_charindex[k] == INLINEBOX_CHAR_INDEX;
+            }
+            addLine(pos, wrap_pos + 1, x, para, pos == 0,
+                    wrap_pos >= m_length-1, preFormattedOnly, isLastPara, hasInlineBoxes);
+            m_flags[wrap_pos] = saved_flags;
+            pos = wrap_pos + 1;
+            if ( !breaks[i].hyphenated && knuthDuplicatesHyphenAfter(kpara, wrap_pos) ) {
+                // Have that hyphen also start the next line, as the planner
+                // assumed, and never break after the copy.
+                pos--;
+                m_flags[pos] &= ~LCHAR_ALLOW_WRAP_AFTER;
+            }
+        }
+        m_para_optimized = false;
+        // Always done here: the last break is the paragraph's last char.
+        // (Lines are already added, so returning false would have the
+        // greedy code add them again.)
+        return true;
+    }
+
     /// Split paragraph into lines
     void processParagraph( int start, int end, bool isLastPara )
     {
@@ -4989,6 +5117,9 @@ public:
             }
             preFormattedOnly = preFormattedOnly && lfFound;
         }
+
+        if ( tryOptimizedParagraph(para, preFormattedOnly, isLastPara) )
+            return;
 
         // Not per-specs, but when floats reduce the available width, skip y until
         // we have the width to draw at least a few chars on a line.
@@ -6083,6 +6214,11 @@ void LFormattedText::setMaxAddedLetterSpacingPercent(int maxAddedLetterSpacingPe
         m_pbuffer->max_added_letter_spacing_percent = maxAddedLetterSpacingPercent;
 }
 
+void LFormattedText::setKnuthJustifyConfig(const KnuthJustifyConfig & config)
+{
+    m_pbuffer->knuth = config;
+}
+
 void LFormattedText::setCJKWidthScalePercent(int cjkWidthScalePercent)
 {
     if (cjkWidthScalePercent>=100 && cjkWidthScalePercent<=150)
@@ -6725,6 +6861,16 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
                             }
                             */
                         }
+                    }
+                    if ( (word->flags & LTEXT_WORD_HAS_DISTRIBUTED_TRACKING) &&
+                            !(srcline->flags & LTEXT_MATH_TRANSFORM) &&
+                            !(drawFlags & LFNT_HINT_CJK_SCALED_WIDTH) &&
+                            word->distinct_glyphs > 1 &&
+                            word->distributed_tracking_points > 0 ) {
+                        drawFlags |= LFNT_HINT_DISTRIBUTED_TRACKING;
+                        w = word->distributed_tracking;
+                        h = knuthPackTracking(word->distributed_tracking_start,
+                                              word->distributed_tracking_points);
                     }
                     font->DrawTextString(
                         buf,

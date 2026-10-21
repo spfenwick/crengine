@@ -22,6 +22,7 @@
 #include "../include/lvdrawbuf.h"
 #include "../include/lvstyles.h"
 #include "../include/lvthread.h"
+#include "../include/knuthjustify.h"
 
 // Uncomment for debugging text measurement or drawing
 // #define DEBUG_MEASURE_TEXT
@@ -1673,6 +1674,7 @@ protected:
     LVFontGlyphUnsignedMetricCache   _wcache;   // glyph width cache
     LVFontGlyphSignedMetricCache     _lsbcache; // glyph left side bearing cache
     LVFontGlyphSignedMetricCache     _rsbcache; // glyph right side bearing cache
+    LVFontGlyphUnsignedMetricCache   _hasglyph_cache; // 1/0: char in this face's cmap
     LVFontLocalGlyphCache            _glyph_cache;
     bool           _drawMonochrome;
     hinting_mode_t _hintingMode;
@@ -1948,6 +1950,7 @@ public:
         _wcache.clear();
         _lsbcache.clear();
         _rsbcache.clear();
+        _hasglyph_cache.clear();
         #if USE_HARFBUZZ==1
         _glyph_cache2.clear();
         _width_cache2.clear();
@@ -2584,6 +2587,30 @@ public:
             }
         }
         return ch_glyph_index;
+    }
+
+    virtual bool hasGlyph( lUInt32 code, bool is_fallback=false ) {
+        // Mirrors the lookup in getGlyphInfo() without FT_Load_Glyph.
+        // Only this face's own answer is cached: fallbacks are asked live.
+        // The cache only covers codes up to 0x2CFFF (above, its index wraps
+        // and would alias lower codes), so higher ones are looked up live.
+        lUInt16 cached;
+        if ( code <= 0x2CFFF ) {
+            cached = _hasglyph_cache.get( code );
+            if ( cached == CACHED_UNSIGNED_METRIC_NOT_SET ) {
+                cached = getCharIndex( code, 0 ) != 0 ? 1 : 0;
+                _hasglyph_cache.put( code, cached );
+            }
+        }
+        else {
+            cached = getCharIndex( code, 0 ) != 0 ? 1 : 0;
+        }
+        if ( cached )
+            return true;
+        LVFontRef fallback = is_fallback ? getNextFallbackFont() : getFallbackFont();
+        if ( !fallback )
+            return false;
+        return fallback->hasGlyph( code, true );
     }
 
     /** \brief get glyph info
@@ -4414,6 +4441,7 @@ public:
         updateTransform(); // no-op
 
         bool transform_stretch = flags & LFNT_HINT_TRANSFORM_STRETCH;
+        bool distributed_tracking = flags & LFNT_HINT_DISTRIBUTED_TRACKING;
         int text_height = transform_stretch ? target_h : _height;
         if ( y + text_height < clip.top || y >= clip.bottom )
             return 0;
@@ -4534,9 +4562,33 @@ public:
             int fb_t_start = 0;
             int fb_t_end = len;
             int hg = 0;  // index in glyph_info/glyph_pos
+            KnuthTrackingPen tracking(distributed_tracking ? target_w : 0,
+                                      distributed_tracking ? target_h : 0);
             int fractional_positioning_granularity = getFractionalGlyphPositioningGranularity();
             bool use_fractional_positioning = fractional_positioning_granularity > 1;
             lInt32 x_64 = x * 64;
+            if ( use_fractional_positioning && tracking.active() ) {
+                // word->x already contains the integer part assigned during
+                // layout. Restore the line accumulator's fractional part so
+                // kerning and tracking advance one continuous 26.6 pen even
+                // though words are drawn in separate calls.
+                x_64 += tracking.startOffsetX64();
+                x = FONT_METRIC_TO_PX(x_64);
+            }
+            // Move the pen by the tracking of the next n glyph gaps
+            auto advanceTracking = [&](int n) {
+                int delta_px, delta_x64;
+                if ( !tracking.advance(n, delta_px, delta_x64) )
+                    return;
+                if ( use_fractional_positioning ) {
+                    x_64 += delta_x64;
+                    x = FONT_METRIC_TO_PX(x_64);
+                }
+                else {
+                    x += delta_px;
+                    x_64 = x * 64;
+                }
+            };
             while (hg < glyph_count) { // hg is the start of a new cluster at this point
                 bool draw_with_fallback = false;
                 int hcl = glyph_info[hg].cluster;
@@ -4634,6 +4686,9 @@ public:
                     // Adjust DrawTextString() params for fallback drawing
                     lUInt32 fb_flags = flags | LFNT_HINT_IS_FALLBACK_FONT;
                     fb_flags &= ~LFNT_DRAW_DECORATION_MASK; // main font will do text decoration
+                    // The fallback font has no view of this line's tracking
+                    // accumulator: let it draw naturally, and catch up below.
+                    fb_flags &= ~LFNT_HINT_DISTRIBUTED_TRACKING;
                     // We must keep direction, but we should drop BOT/EOT flags
                     // if this segment is not at start/end (this might be bogus
                     // if the char at start or end is a space that could be drawn
@@ -4655,6 +4710,19 @@ public:
                        width, text_decoration_back_gap, target_w, target_h, svg_collector );
                     x += fb_advance;
                     x_64 = x * 64;
+                    if ( tracking.active() ) {
+                        // Apply the tracking this font would have added after
+                        // each of the skipped clusters, so the following
+                        // glyphs land where layout put them.
+                        int fb_clusters = 0;
+                        for (int k = hg; k < hg2; k++) {
+                            if ( k == hg || glyph_info[k].cluster != glyph_info[k-1].cluster )
+                                fb_clusters++;
+                        }
+                        if ( hg2 >= glyph_count )
+                            fb_clusters--; // no gap after the last cluster
+                        advanceTracking(fb_clusters);
+                    }
                     #ifdef DEBUG_DRAW_TEXT
                         printf("DTHB ### drawn past notdef > X+= %d\n[...]", fb_advance);
                     #endif
@@ -4822,6 +4890,8 @@ public:
                             x += letter_spacing;
                             x_64 = x * 64;
                         }
+                        if ( hg2 < glyph_count )
+                            advanceTracking(1);
                     }
                 }
                 hg = hg2;
@@ -5321,6 +5391,8 @@ public:
 
     virtual bool getGlyphInfo(lUInt32 c, glyph_info_t* g, lChar32 d=0, bool gi=false, bool fb=false)
         { return _font->getGlyphInfo(c, g, d, gi, fb); }
+    virtual bool hasGlyph(lUInt32 c, bool fb=false)
+        { return _font->hasGlyph(c, fb); }
     virtual bool getGlyphExtraMetric(glyph_extra_metric_t m, lUInt32 c, int& v,
                                       bool s=true, lChar32 d=0, bool fb=false)
         { return _font->getGlyphExtraMetric(m, c, v, s, d, fb); }
@@ -5435,6 +5507,8 @@ public:
         { LVFont* f; lChar32 m; mapChar(ch, f, m); return f->getRightSideBearing(m, n, i); }
     virtual bool getGlyphInfo(lUInt32 c, glyph_info_t* g, lChar32 d=0, bool gi=false, bool fb=false)
         { LVFont* f; lChar32 m; mapChar((lChar32)c, f, m); return f->getGlyphInfo((lUInt32)m, g, d, gi, fb); }
+    virtual bool hasGlyph(lUInt32 c, bool fb=false)
+        { LVFont* f; lChar32 m; mapChar((lChar32)c, f, m); return f->hasGlyph((lUInt32)m, fb); }
     virtual bool getGlyphExtraMetric(glyph_extra_metric_t mt, lUInt32 c, int& v,
                                       bool s=true, lChar32 d=0, bool fb=false)
         { LVFont* f; lChar32 m; mapChar((lChar32)c, f, m); return f->getGlyphExtraMetric(mt, (lUInt32)m, v, s, d, fb); }

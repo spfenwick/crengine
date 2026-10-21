@@ -236,6 +236,7 @@ enum kerning_mode_t {
 #define LFNT_HINT_TRANSFORM_STRETCH      0x0100 /// Glyph(s) are to be stretched so their bounding box fits the provided w/h
 #define LFNT_HINT_CJK_ALTERED_WIDTH      0x0200 /// CJK full width glyph is to be shifted to look correct in a non-nominal width
 #define LFNT_HINT_CJK_SCALED_WIDTH       0x0400 /// CJK full width glyph has been scaled by cjk_width_scale_percent
+#define LFNT_HINT_DISTRIBUTED_TRACKING   0x0800 /// target_w pixels of tracking are spread across target_h glyph gaps
 
 // These 4 translate from LTEXT_TD_* equivalents (see lvtextfm.h). Keep them in sync.
 #define LFNT_DRAW_UNDERLINE              0x1000 /// underlined text
@@ -449,6 +450,14 @@ public:
         \return true if glyh was found
     */
     virtual bool getGlyphInfo( lUInt32 code, glyph_info_t * glyph, lChar32 def_char=0, bool code_is_glyph_index=false, bool is_fallback=false ) = 0;
+
+    /// true if this font or its fallback chain has a glyph for code. Same
+    /// answer as getGlyphInfo(code, &glyph, 0), but fonts may override it to
+    /// skip loading and hinting the glyph.
+    virtual bool hasGlyph( lUInt32 code, bool is_fallback=false ) {
+        glyph_info_t glyph;
+        return getGlyphInfo( code, &glyph, 0, false, is_fallback );
+    }
 
     /** \brief add glyph SVG path to SVGGlyphsCollector
     */

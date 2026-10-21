@@ -3940,6 +3940,7 @@ LFormattedText * lxmlDocBase::createFormattedText()
     p->setMinSpaceCondensingPercent(_minSpaceCondensingPercent);
     p->setUnusedSpaceThresholdPercent(_unusedSpaceThresholdPercent);
     p->setMaxAddedLetterSpacingPercent(_maxAddedLetterSpacingPercent);
+    p->setKnuthJustifyConfig(_knuthJustifyConfig);
     p->setCJKWidthScalePercent(_cjkWidthScalePercent);
     p->setHighlightOptions(&_highlightOptions);
     return p;
@@ -5590,6 +5591,9 @@ bool ldomDocument::render( LVRendPageList * pages, LVDocViewCallback * callback,
 //        CRLog::debug("Style hash before setRenderProps: %x", styleHash);
 //    } //bool propsChanged =
     setRenderProps( width, dy, showCover, y0, def_font, def_interline_space, props );
+    // Hyphenation settings or dictionaries may have changed since the last
+    // (full or partial) rendering.
+    knuthClearHyphenationCache();
 
     // update styles
 //    if ( getRootNode()->getStyle().isNull() || getRootNode()->getFont().isNull()
@@ -18863,6 +18867,7 @@ lUInt32 tinyNodeCollection::calcStyleHash(bool already_rendered, lUInt32 force_n
     res = res * 31 + _spaceWidthScalePercent;
     res = res * 31 + _minSpaceCondensingPercent;
     res = res * 31 + _unusedSpaceThresholdPercent;
+    res = _knuthJustifyConfig.addToHash(res);
     res = res * 31 + _cjkWidthScalePercent;
 
     // _maxAddedLetterSpacingPercent does not need to be accounted, as, working

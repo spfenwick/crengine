@@ -43,6 +43,7 @@
 #include "lvimg.h"
 #include "props.h"
 #include "bookformats.h"
+#include "knuthjustify.h"
 
 #if MATHML_SUPPORT==1
 #include "mathml.h"
@@ -569,6 +570,7 @@ protected:
     int  _minSpaceCondensingPercent;
     int  _unusedSpaceThresholdPercent;
     int  _maxAddedLetterSpacingPercent;
+    KnuthJustifyConfig _knuthJustifyConfig;
     int  _cjkWidthScalePercent;
 
     lUInt32 _nodeStyleHash;
@@ -670,6 +672,19 @@ public:
         _maxAddedLetterSpacingPercent = maxAddedLetterSpacingPercent;
         // This does not need to trigger a re-rendering, just
         // a re-formatting of the final blocks
+        _renderedBlockCache.clear();
+        return true;
+    }
+
+    bool setKnuthJustifyConfig(const KnuthJustifyConfig & config) {
+        if (config == _knuthJustifyConfig)
+            return false;
+        // Greedy mode ignores the other settings: changing them while it
+        // is on is kept for later, but needs no re-rendering.
+        bool rerender = !(config.isGreedy() && _knuthJustifyConfig.isGreedy());
+        _knuthJustifyConfig = config;
+        if (!rerender)
+            return false;
         _renderedBlockCache.clear();
         return true;
     }
