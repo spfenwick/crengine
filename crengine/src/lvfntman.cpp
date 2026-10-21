@@ -22,6 +22,7 @@
 #include "../include/lvdrawbuf.h"
 #include "../include/lvstyles.h"
 #include "../include/lvthread.h"
+#include "../include/knuthjustify.h"
 
 // Uncomment for debugging text measurement or drawing
 // #define DEBUG_MEASURE_TEXT
@@ -2586,6 +2587,16 @@ public:
         return ch_glyph_index;
     }
 
+    virtual bool hasGlyph( lUInt32 code, bool is_fallback=false ) {
+        // Mirrors the lookup in getGlyphInfo() without FT_Load_Glyph.
+        if ( getCharIndex( code, 0 ) != 0 )
+            return true;
+        LVFontRef fallback = is_fallback ? getNextFallbackFont() : getFallbackFont();
+        if ( !fallback )
+            return false;
+        return fallback->hasGlyph( code, true );
+    }
+
     /** \brief get glyph info
         \param glyph is pointer to glyph_info_t struct to place retrieved info
         \return true if glyh was found
@@ -4414,6 +4425,7 @@ public:
         updateTransform(); // no-op
 
         bool transform_stretch = flags & LFNT_HINT_TRANSFORM_STRETCH;
+        bool distributed_tracking = flags & LFNT_HINT_DISTRIBUTED_TRACKING;
         int text_height = transform_stretch ? target_h : _height;
         if ( y + text_height < clip.top || y >= clip.bottom )
             return 0;
@@ -4534,9 +4546,27 @@ public:
             int fb_t_start = 0;
             int fb_t_end = len;
             int hg = 0;  // index in glyph_info/glyph_pos
+            int tracking_width = distributed_tracking ? target_w : 0;
+            lUInt32 tracking_packed = distributed_tracking
+                    ? (lUInt32)target_h : 0;
+            int tracking_points = tracking_packed & 0xFFFF;
+            int tracking_start = tracking_packed >> 16;
+            int tracking_points_done = tracking_start;
+            int tracking_width_done = tracking_points > 0
+                    ? tracking_width * tracking_start / tracking_points : 0;
+            int tracking_width_done_x64 = knuthDistributedTrackingX64(
+                    tracking_width, tracking_start, tracking_points);
             int fractional_positioning_granularity = getFractionalGlyphPositioningGranularity();
             bool use_fractional_positioning = fractional_positioning_granularity > 1;
             lInt32 x_64 = x * 64;
+            if ( use_fractional_positioning && tracking_points > 0 ) {
+                // word->x already contains the integer part assigned during
+                // layout. Restore the line accumulator's fractional part so
+                // kerning and tracking advance one continuous 26.6 pen even
+                // though words are drawn in separate calls.
+                x_64 += tracking_width_done_x64 - tracking_width_done * 64;
+                x = FONT_METRIC_TO_PX(x_64);
+            }
             while (hg < glyph_count) { // hg is the start of a new cluster at this point
                 bool draw_with_fallback = false;
                 int hcl = glyph_info[hg].cluster;
@@ -4821,6 +4851,28 @@ public:
                         else {
                             x += letter_spacing;
                             x_64 = x * 64;
+                        }
+                        if ( tracking_points_done < tracking_points &&
+                                hg2 < glyph_count ) {
+                            tracking_points_done++;
+                            int target_done = tracking_width *
+                                    tracking_points_done / tracking_points;
+                            if ( use_fractional_positioning ) {
+                                int target_done_x64 = knuthDistributedTrackingX64(
+                                        tracking_width, tracking_points_done,
+                                        tracking_points);
+                                x_64 += target_done_x64 -
+                                        tracking_width_done_x64;
+                                x = FONT_METRIC_TO_PX(x_64);
+                                tracking_width_done_x64 = target_done_x64;
+                            }
+                            else {
+                                int tracking_delta = target_done -
+                                        tracking_width_done;
+                                x += tracking_delta;
+                                x_64 = x * 64;
+                            }
+                            tracking_width_done = target_done;
                         }
                     }
                 }
@@ -5321,6 +5373,8 @@ public:
 
     virtual bool getGlyphInfo(lUInt32 c, glyph_info_t* g, lChar32 d=0, bool gi=false, bool fb=false)
         { return _font->getGlyphInfo(c, g, d, gi, fb); }
+    virtual bool hasGlyph(lUInt32 c, bool fb=false)
+        { return _font->hasGlyph(c, fb); }
     virtual bool getGlyphExtraMetric(glyph_extra_metric_t m, lUInt32 c, int& v,
                                       bool s=true, lChar32 d=0, bool fb=false)
         { return _font->getGlyphExtraMetric(m, c, v, s, d, fb); }
@@ -5435,6 +5489,8 @@ public:
         { LVFont* f; lChar32 m; mapChar(ch, f, m); return f->getRightSideBearing(m, n, i); }
     virtual bool getGlyphInfo(lUInt32 c, glyph_info_t* g, lChar32 d=0, bool gi=false, bool fb=false)
         { LVFont* f; lChar32 m; mapChar((lChar32)c, f, m); return f->getGlyphInfo((lUInt32)m, g, d, gi, fb); }
+    virtual bool hasGlyph(lUInt32 c, bool fb=false)
+        { LVFont* f; lChar32 m; mapChar((lChar32)c, f, m); return f->hasGlyph((lUInt32)m, fb); }
     virtual bool getGlyphExtraMetric(glyph_extra_metric_t mt, lUInt32 c, int& v,
                                       bool s=true, lChar32 d=0, bool fb=false)
         { LVFont* f; lChar32 m; mapChar((lChar32)c, f, m); return f->getGlyphExtraMetric(mt, (lUInt32)m, v, s, d, fb); }

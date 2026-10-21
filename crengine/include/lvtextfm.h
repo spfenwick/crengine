@@ -176,6 +176,10 @@ typedef struct
    };
    lInt16   added_letter_spacing;    /* letter-spacing (to reduce spacing when justified) to add when drawing this word */
    lInt16   distinct_glyphs;         /* nb of glyphs in this word that can have letter-spacing added to */
+   lInt16   natural_space_width;     /* natural width of an adjustable trailing word space */
+   lInt16   distributed_tracking;    /* total line-wide microtracking adjustment in pixels */
+   lInt16   distributed_tracking_start;  /* glyph-gap offset of this word in the line-wide distribution */
+   lInt16   distributed_tracking_points; /* total glyph gaps participating in the line-wide distribution */
    lInt16   _top_to_baseline;        /* temporary storage slots when delaying y computation, */
    lInt16   _baseline_to_bottom;     /* when valign top or bottom */
    // lUInt16  padding;         /**< \brief not used */
@@ -208,7 +212,7 @@ typedef struct
 #define LTEXT_WORD_VALIGN_BOTTOM             0x2000 /// word is to be vertical-align: bottom
 #define LTEXT_WORD_STRUT_CONFINED            0x4000 /// word is to be fully contained into strut bounds
                                                     /// (used only when one of the 2 previous is set)
-#define LTEXT_WORD__AVAILABLE_BIT_16__       0x8000
+#define LTEXT_WORD_HAS_DISTRIBUTED_TRACKING  0x8000 /// line-wide distributed_tracking is applied between glyphs while drawing
 
 //#define LTEXT_BACKGROUND_MARK_FLAGS 0xFFFF0000l
 
@@ -318,6 +322,22 @@ typedef struct
    lInt32                unused_space_threshold_percent; /**< % (of line width) of unused space on a line to trigger hyphenation,
                                                               or addition of letter spacing for justification  */
    lInt32                max_added_letter_spacing_percent; /**< Max allowed added letter spacing (% of font size) */
+   lInt32                line_breaking_mode; /**< 0: greedy, 1: Knuth-Plass optimization of suitable justified paragraphs */
+   lInt32                justify_space_shrink_percent;
+   lInt32                justify_space_stretch_percent;
+   lInt32                justify_tracking_shrink_percent;
+   lInt32                justify_tracking_stretch_percent;
+   lInt32                justify_pretolerance;
+   lInt32                justify_tolerance;
+   lInt32                justify_hyphen_penalty;
+   lInt32                justify_explicit_hyphen_penalty;
+   lInt32                justify_line_penalty;
+   lInt32                justify_adjacent_demerits;
+   lInt32                justify_double_hyphen_demerits;
+   lInt32                justify_final_hyphen_demerits;
+   lInt32                justify_emergency_stretch_percent;
+   lInt32                justify_last_line_min_percent;
+   lInt32                justify_tracking_delta_max_bp;
    // CJK char width
    lInt32                cjk_width_scale_percent; /**< scale the normal width of all CJK chars in all fonts by this percent */
 
@@ -435,6 +455,20 @@ public:
 
     /// set max allowed added letter spacing (0..20% of font size)
     void setMaxAddedLetterSpacingPercent(int maxAddedLetterSpacingPercent);
+
+    /// set line breaking mode (0: greedy, 1: Knuth-Plass paragraph optimization)
+    void setLineBreakingMode(int lineBreakingMode);
+
+    /// set Knuth-Plass justification limits and penalties
+    void setJustificationConfig(
+            int spaceShrinkPercent, int spaceStretchPercent,
+            int trackingShrinkPercent, int trackingStretchPercent,
+            int pretolerance, int tolerance,
+            int hyphenPenalty, int explicitHyphenPenalty,
+            int linePenalty, int adjacentDemerits,
+            int doubleHyphenDemerits, int finalHyphenDemerits,
+            int emergencyStretchPercent, int lastLineMinPercent,
+            int trackingDeltaMaxBp);
 
     /// set CJK glyph width scaling percent option (100..150%)
     // (scale the nominal width of all CJK chars in all fonts by this percent)
