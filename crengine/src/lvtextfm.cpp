@@ -438,16 +438,20 @@ void LFormattedText::AddSourceObject(
 // ldomDocument::render() clears this cache.
 class OptimalHyphenationCache {
 public:
-    enum { SLOT_COUNT = 4096, MAX_WORD_LEN = 22 };
+    // Slots keep a 64-bit key for the word instead of the word itself:
+    // 16 bytes per slot, so 1 MiB for all of them. Two different words
+    // would need the same 64-bit key to get each other's hyphenation
+    // points, which for the tens of thousands of distinct words of a book
+    // is about a 1 in 10^10 chance.
+    enum { SLOT_COUNT = 65536, MAX_WORD_LEN = 64 }; // MAX_WORD_LEN: bits in points
     struct Slot {
-        HyphMethod * method;
+        lUInt64 key;    // 0 when empty
         lUInt64 points; // bit i: a hyphen may follow char i
-        int len;
-        lChar32 word[MAX_WORD_LEN];
     };
-    // Returns the slot for this word: matching it if slot->len > 0, or to
-    // fill with store(). NULL for words too long to cache.
-    Slot * find(HyphMethod * method, const lChar32 * word, int len) {
+    // Returns the slot for this word, and its key in key: the slot holds
+    // this word's points if slot->key == key, or is to fill with store().
+    // NULL for words too long to cache.
+    Slot * find(HyphMethod * method, const lChar32 * word, int len, lUInt64 & key) {
         if ( len > MAX_WORD_LEN )
             return NULL;
         if ( !_slots ) {
@@ -455,22 +459,19 @@ public:
             if ( !_slots )
                 return NULL;
         }
-        lUInt32 hash = 2166136261u ^ (lUInt32)(size_t)method;
+        // 64-bit FNV-1a over the method, the length and the chars.
+        const lUInt64 prime = 1099511628211ULL;
+        key = (14695981039346656037ULL ^ (lUInt64)(size_t)method) * prime;
+        key = (key ^ (lUInt64)len) * prime;
         for ( int i=0; i<len; i++ )
-            hash = (hash ^ word[i]) * 16777619u;
-        Slot * slot = &_slots[(hash ^ (hash >> 15)) & (SLOT_COUNT - 1)];
-        bool match = slot->method == method && slot->len == len &&
-                memcmp(slot->word, word, len * sizeof(lChar32)) == 0;
-        if ( !match )
-            slot->len = 0;
-        return slot;
+            key = (key ^ word[i]) * prime;
+        if ( key == 0 )
+            key = 1; // 0 marks an empty slot
+        return &_slots[(key ^ (key >> 32)) & (SLOT_COUNT - 1)];
     }
-    static void store(Slot * slot, HyphMethod * method, const lChar32 * word,
-                      int len, lUInt64 points) {
-        slot->method = method;
+    static void store(Slot * slot, lUInt64 key, lUInt64 points) {
+        slot->key = key;
         slot->points = points;
-        slot->len = len;
-        memcpy(slot->word, word, len * sizeof(lChar32));
     }
     void clear() {
         free(_slots);
@@ -5341,9 +5342,10 @@ public:
         HyphMethod * method = src->lang_cfg->getHyphMethod();
         // With a maxWidth of 0xFFFF, the glyph widths passed below never
         // change the result: the word alone decides, so it can be cached.
+        lUInt64 key = 0;
         OptimalHyphenationCache::Slot * slot =
-                optimalHyphenationCache.find(method, m_text+wstart, len);
-        if ( slot && slot->len )
+                optimalHyphenationCache.find(method, m_text+wstart, len, key);
+        if ( slot && slot->key == key )
             return slot->points;
         lUInt16 widths[MAX_WORD_SIZE];
         lUInt16 flags[MAX_WORD_SIZE];
@@ -5363,7 +5365,7 @@ public:
                 points |= (lUInt64)1 << i;
         }
         if ( slot )
-            OptimalHyphenationCache::store(slot, method, m_text+wstart, len, points);
+            OptimalHyphenationCache::store(slot, key, points);
         return points;
     }
 
