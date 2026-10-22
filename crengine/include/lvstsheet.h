@@ -165,8 +165,13 @@ public:
     LVCssSelectorRef getSubSelectors() const { return _subSelectors; }
     void setSubSelectors(LVCssSelectorRef subSelectors) { _subSelectors = subSelectors; }
     ~LVCssSelectorRule() { if (_next) delete _next; }
-    // A fail-fast check, returning false to rule out a match.
-    bool quickClassCheck(const lUInt32 *classHashes, size_t size) const;
+    /// If this rule is a class name rule (.foo), set hash to the class name hash and return true
+    bool getRequiredClassHash(lUInt32 & hash) const {
+        if (_type != cssrt_class)
+            return false;
+        hash = _valueHash;
+        return true;
+    }
     /// check condition for node
     bool check( const ldomNode * & node, bool allow_cache=true ) const;
     /// check next rules for node
@@ -204,6 +209,10 @@ public:
     bool parse( const char * &str, lxmlDocBase * doc, bool useragent_sheet=false, bool for_functional_pseudo_class=false );
     lUInt16 getElementNameId() const { return _id; }
     bool check( const ldomNode * node, bool allow_cache=true ) const;
+    /// If this selector can only match elements with a given class name, set hash
+    /// to that class name hash and return true (a fail-fast check, before check())
+    bool getRequiredClassHash(lUInt32 & hash) const;
+    /// Fail-fast check: false if the node's class names rule out a match
     bool quickClassCheck(const lUInt32 *classHashes, size_t size) const;
     void applyToPseudoElement( const ldomNode * node, css_style_rec_t * style ) const;
     void apply( const ldomNode * node, css_style_rec_t * style ) const
@@ -256,6 +265,47 @@ public:
     \sa LVCssSelector
     \sa LVCssDeclaration
 */
+/// Index of a chain of selectors by the class name each one requires (if any),
+/// to iterate, in chain order, only those that may match an element's class names.
+class LVCssSelectorClassIndex {
+    // Selectors by position in the chain
+    LVArray<LVCssSelector *> _selectors;
+    // Positions of selectors requiring a class name, as (class name hash << 32 | position), sorted
+    LVArray<lUInt64> _by_class;
+    // Positions of selectors not requiring any class name, in order
+    LVArray<lUInt64> _always;
+    bool _valid;
+public:
+    LVCssSelectorClassIndex() : _valid(false) { }
+    // Never copied: it points into its owner's selectors
+    LVCssSelectorClassIndex( const LVCssSelectorClassIndex & ) : _valid(false) { }
+    LVCssSelectorClassIndex & operator=( const LVCssSelectorClassIndex & ) { invalidate(); return *this; }
+    bool isValid() const { return _valid; }
+    void invalidate() {
+        _valid = false;
+        _selectors.clear();
+        _by_class.clear();
+        _always.clear();
+    }
+    void build( LVCssSelector * chain );
+
+    /// Iterates, in chain order, the indexed selectors that may match
+    /// an element with the provided class name hashes
+    class Walker {
+        enum { MAX_LISTS = 16 };
+        const LVCssSelectorClassIndex & _index;
+        const lUInt64 * _cur[MAX_LISTS];
+        const lUInt64 * _end[MAX_LISTS];
+        int _nb_lists; // -1 if the element has too many class names to be walked this way
+    public:
+        Walker( const LVCssSelectorClassIndex & index, const lUInt32 * classHashes, int count );
+        /// false when the caller needs to check the whole chain itself
+        bool isUsable() const { return _nb_lists >= 0; }
+        /// next selector that may match, or NULL when done
+        LVCssSelector * next();
+    };
+};
+
 class LVStyleSheet {
 public:
     // @font-face declaration stored so that the stylesheet cache can replay
@@ -279,6 +329,11 @@ private:
 
     LVPtrVector <LVCssSelector> _selectors;
     LVPtrVector <LVPtrVector <LVCssSelector> > _stack;
+    // Index of the _selectors[0] chain (selectors with no element name on their
+    // right, like ".quote" or "div .quote") by required class name, as checking
+    // that whole chain for each element is costly with large book stylesheets.
+    // Built when first needed: it must be invalidated when _selectors change.
+    mutable LVCssSelectorClassIndex _class_index;
     LVPtrVector <LVCssSelector> * dup()
     {
         LVPtrVector <LVCssSelector> * res = new LVPtrVector <LVCssSelector>();
@@ -351,6 +406,7 @@ public:
         _selector_count = 0;
         _selector_count_stack.clear();
         _selectors.clear();
+        _class_index.invalidate();
         _stack.clear();
         _fontFaceDecls.clear();
     }

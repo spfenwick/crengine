@@ -21,6 +21,8 @@
 #include "../include/lvstream.h"
 #include "../include/lvrend.h"   // for -cr-only-if:
 
+#include <algorithm>
+
 // define to dump all tokens
 //#define DUMP_CSS_PARSING
 
@@ -6595,16 +6597,6 @@ bool LVCssSelectorRule::checkInnerText( const ldomNode * & node ) const {
     return false;
 }
 
-bool LVCssSelectorRule::quickClassCheck(const lUInt32 *classHashes, size_t size) const {
-    if (_type != cssrt_class)
-        return true;
-    for (size_t i = 0; i < size; ++i) {
-        if (classHashes[i] == _valueHash)
-            return true;
-    }
-    return false;
-}
-
 static bool getOriginalFragmentAttributeValue(const ldomNode *node, lUInt16 attrid, lString32 &original_value) {
     // EPUB/CHM documents are merged into a single DOM, and ldomDocumentFragmentWriter
     // rewrites some attributes with a "_doc_fragment_N_ " prefix so they stay unique.
@@ -7339,9 +7331,22 @@ bool LVCssSelector::check( const ldomNode * node, bool allow_cache ) const
     return true;
 }
 
-bool LVCssSelector::quickClassCheck(const lUInt32 *classHashes, size_t size) const {
+bool LVCssSelector::getRequiredClassHash(lUInt32 & hash) const {
     // pseudo_elem: `LVCssSelector::check()` may move the check to its parent node
-    return !_rules || _pseudo_elem || _rules->quickClassCheck(classHashes, size);
+    if ( !_rules || _pseudo_elem )
+        return false;
+    return _rules->getRequiredClassHash(hash);
+}
+
+bool LVCssSelector::quickClassCheck(const lUInt32 *classHashes, size_t size) const {
+    lUInt32 required;
+    if ( !getRequiredClassHash(required) )
+        return true;
+    for (size_t i = 0; i < size; ++i) {
+        if (classHashes[i] == required)
+            return true;
+    }
+    return false;
 }
 
 bool parse_attr_value( const char * &str, char * buf, bool &parse_trailing_i, char stop_char=']' )
@@ -8000,6 +8005,7 @@ LVCssSelector::LVCssSelector( LVCssSelector & v )
 void LVStyleSheet::set(LVPtrVector<LVCssSelector> & v  )
 {
     _selectors.clear();
+    _class_index.invalidate();
     if ( !v.size() )
         return;
     _selectors.reserve( v.size() );
@@ -8035,6 +8041,67 @@ static void for_each_split(const lChar32 *begin, F functor) {
     }
     if (end > begin)
         functor(begin, end);
+}
+
+void LVCssSelectorClassIndex::build( LVCssSelector * chain )
+{
+    invalidate();
+    lUInt64 pos = 0;
+    for ( LVCssSelector * s = chain; s; s = s->getNext(), pos++ ) {
+        _selectors.add(s);
+        lUInt32 hash;
+        if ( s->getRequiredClassHash(hash) )
+            _by_class.add( ((lUInt64)hash << 32) | pos );
+        else
+            _always.add(pos);
+    }
+    std::sort(_by_class.ptr(), _by_class.ptr() + _by_class.length());
+    _valid = true;
+}
+
+LVCssSelectorClassIndex::Walker::Walker( const LVCssSelectorClassIndex & index, const lUInt32 * classHashes, int count )
+    : _index(index), _nb_lists(0)
+{
+    // One sorted list of positions for the selectors not requiring a class name,
+    // and one for each of the element's class names required by some selectors.
+    if ( _index._always.length() > 0 ) {
+        _cur[_nb_lists] = _index._always.ptr();
+        _end[_nb_lists] = _index._always.ptr() + _index._always.length();
+        _nb_lists++;
+    }
+    const lUInt64 * begin = _index._by_class.ptr();
+    const lUInt64 * end = begin + _index._by_class.length();
+    for ( int i = 0; i < count; i++ ) {
+        lUInt64 key = (lUInt64)classHashes[i] << 32;
+        const lUInt64 * first = std::lower_bound(begin, end, key);
+        if ( first == end || (*first >> 32) != classHashes[i] )
+            continue; // no selector requires this class name
+        if ( _nb_lists >= MAX_LISTS ) {
+            _nb_lists = -1;
+            return;
+        }
+        _cur[_nb_lists] = first;
+        _end[_nb_lists] = std::upper_bound(first, end, key | 0xFFFFFFFF);
+        _nb_lists++;
+    }
+}
+
+LVCssSelector * LVCssSelectorClassIndex::Walker::next()
+{
+    // Merge the lists, in chain order
+    lUInt32 best = 0xFFFFFFFF;
+    for ( int i = 0; i < _nb_lists; i++ ) {
+        if ( _cur[i] < _end[i] && (lUInt32)*_cur[i] < best )
+            best = (lUInt32)*_cur[i];
+    }
+    if ( best == 0xFFFFFFFF )
+        return NULL;
+    // Advance all lists on it (an element can have the same class name twice)
+    for ( int i = 0; i < _nb_lists; i++ ) {
+        if ( _cur[i] < _end[i] && (lUInt32)*_cur[i] == best )
+            _cur[i]++;
+    }
+    return _index._selectors[best];
 }
 
 void LVStyleSheet::apply( const ldomNode * node, css_style_rec_t * style ) const
@@ -8118,6 +8185,16 @@ void LVStyleSheet::apply( const ldomNode * node, css_style_rec_t * style ) const
         class_hash_array.add(lString32::getHash(begin, end));
     });
 
+    // Walk _selectors[0] through its class index, which skips the selectors
+    // requiring a class name this node does not have (most of them, with
+    // large book stylesheets). Those it gives already pass quickClassCheck().
+    if ( !_class_index.isValid() )
+        _class_index.build(selector_0);
+    LVCssSelectorClassIndex::Walker class_walker(_class_index, class_hash_array.ptr(), class_hash_array.length());
+    bool use_class_index = class_walker.isUsable(); // (if not, check the whole chain)
+    if ( use_class_index )
+        selector_0 = class_walker.next();
+
     for (;;)
     {
         if (selector_0!=NULL)
@@ -8125,9 +8202,9 @@ void LVStyleSheet::apply( const ldomNode * node, css_style_rec_t * style ) const
             if (selector_id==NULL || selector_0->getSpecificity() < selector_id->getSpecificity() )
             {
                 // step by sel_0
-                if (selector_0->quickClassCheck(class_hash_array.ptr(), class_hash_array.length()))
+                if (use_class_index || selector_0->quickClassCheck(class_hash_array.ptr(), class_hash_array.length()))
                     selector_0->apply( node, style );
-                selector_0 = selector_0->getNext();
+                selector_0 = use_class_index ? class_walker.next() : selector_0->getNext();
             }
             else
             {
@@ -8315,6 +8392,7 @@ bool LVStyleSheet::parseAndAdvance( const char * &str, bool useragent_sheet, lSt
         {
             // Ok:
             // place rules to sheet
+            _class_index.invalidate();
             for (LVCssSelector * next, * p = selector; p; p = next) {
                 next = p->getNext();
                 insert_into_selectors(p, _selectors);
@@ -8402,6 +8480,7 @@ bool LVStyleSheet::gatherNodeMatchingRulesets(ldomNode * node, const char * str,
 }
 
 void LVStyleSheet::merge(const LVStyleSheet &other) {
+    _class_index.invalidate();
     int length = other._selectors.length();
     if (length > _selectors.length())
         _selectors.set(length - 1, nullptr);
