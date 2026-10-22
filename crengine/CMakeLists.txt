@@ -22,6 +22,7 @@ if ( NOT ${GUI} STREQUAL FB2PROPS )
     src/lvbmpbuf.cpp   
     src/lvfnt.cpp      
     src/hyphman.cpp    
+    src/hbwordcache.cpp
     src/lvfntman.cpp        
     src/crgui.cpp     
     src/lvimg.cpp           
