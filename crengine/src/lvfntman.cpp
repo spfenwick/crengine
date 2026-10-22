@@ -72,6 +72,75 @@
 #include <hb-ft.h>
 #include <hb-ot.h>
 #include "lvhashtable.h"
+
+// Cache of character to glyph lookups, put in front of hb_ft's.
+// hb_ft looks each char up with FT_Get_Char_Index() (a binary search in the cmap)
+// while holding a lock, which costs about 10% of HarfBuzz text measuring.
+// It is installed as a HarfBuzz sub-font: only the nominal glyph functions are
+// overridden, all the others (advances, drawing, glyph names...) are forwarded
+// by HarfBuzz to the parent hb_ft font.
+struct HBCmapCache {
+    enum { SIZE = 1024 }; // direct-mapped by codepoint, must be a power of 2
+    static const hb_codepoint_t NOT_FOUND = 0x80000000;
+    hb_codepoint_t keys[SIZE];   // codepoint+1 (0 = empty slot)
+    hb_codepoint_t glyphs[SIZE]; // glyph id, | NOT_FOUND if the font has no glyph for it
+
+    bool getGlyph(hb_font_t * font, hb_codepoint_t unicode, hb_codepoint_t * glyph) {
+        unsigned int slot = unicode & (SIZE - 1);
+        if ( keys[slot] != unicode + 1 ) {
+            hb_codepoint_t g = 0;
+            bool found = hb_font_get_nominal_glyph(hb_font_get_parent(font), unicode, &g);
+            keys[slot] = unicode + 1;
+            glyphs[slot] = found ? g : (g | NOT_FOUND);
+        }
+        *glyph = glyphs[slot] & ~NOT_FOUND;
+        return !(glyphs[slot] & NOT_FOUND);
+    }
+};
+
+static hb_bool_t hbCmapCacheGetNominalGlyph(hb_font_t * font, void * font_data, hb_codepoint_t unicode,
+                                            hb_codepoint_t * glyph, void * /*user_data*/) {
+    return ((HBCmapCache *)font_data)->getGlyph(font, unicode, glyph);
+}
+
+static unsigned int hbCmapCacheGetNominalGlyphs(hb_font_t * font, void * font_data, unsigned int count,
+                                                const hb_codepoint_t * first_unicode, unsigned int unicode_stride,
+                                                hb_codepoint_t * first_glyph, unsigned int glyph_stride,
+                                                void * /*user_data*/) {
+    HBCmapCache * cache = (HBCmapCache *)font_data;
+    // Must stop at the first char without a glyph, and return how many were found
+    unsigned int done = 0;
+    for ( ; done < count; done++ ) {
+        if ( !cache->getGlyph(font, *first_unicode, first_glyph) )
+            break;
+        first_unicode = (const hb_codepoint_t *)((const char *)first_unicode + unicode_stride);
+        first_glyph = (hb_codepoint_t *)((char *)first_glyph + glyph_stride);
+    }
+    return done;
+}
+
+static void hbCmapCacheDestroy(void * font_data) {
+    free(font_data);
+}
+
+/// Wrap a hb_ft font into a sub-font caching its cmap lookups (takes ownership of ft_font)
+static hb_font_t * hbFontWithCmapCache(hb_font_t * ft_font) {
+    static hb_font_funcs_t * funcs = NULL;
+    if ( !funcs ) {
+        funcs = hb_font_funcs_create();
+        hb_font_funcs_set_nominal_glyph_func(funcs, hbCmapCacheGetNominalGlyph, NULL, NULL);
+        hb_font_funcs_set_nominal_glyphs_func(funcs, hbCmapCacheGetNominalGlyphs, NULL, NULL);
+        hb_font_funcs_make_immutable(funcs);
+    }
+    HBCmapCache * cache = (HBCmapCache *)calloc(1, sizeof(HBCmapCache));
+    if ( !cache )
+        return ft_font; // use it uncached
+    // The sub-font gets the parent's scale and variation coordinates
+    hb_font_t * font = hb_font_create_sub_font(ft_font);
+    hb_font_destroy(ft_font); // the sub-font keeps its own reference
+    hb_font_set_funcs(font, funcs, cache, hbCmapCacheDestroy);
+    return font;
+}
 #endif
 
 #if (USE_FONTCONFIG==1)
@@ -2167,29 +2236,52 @@ public:
         // Also update HB load flags with the updated hinting mode.
         // We need this destroy/create, as only these will clear some internal HB caches
         // (ft_font->advance_cache, ft_font->cached_x_scale); hb_ft_font_set_load_flags will not.
-        if (_hb_font)
-            hb_font_destroy(_hb_font);
-        _hb_font = hb_ft_font_create(_face, NULL);
-        if (_hb_font) {
-            // Use the same load flags as we do when using FT directly, to avoid mismatching advances & raster
-            int flags = FT_LOAD_DEFAULT;
-            flags |= (!_drawMonochrome ? FT_LOAD_TARGET_LIGHT : FT_LOAD_TARGET_MONO);
-            if (_hintingMode == HINTING_MODE_BYTECODE_INTERPRETOR) {
-                flags |= FT_LOAD_NO_AUTOHINT;
-            }
-            else if (_hintingMode == HINTING_MODE_AUTOHINT) {
-                flags |= FT_LOAD_FORCE_AUTOHINT;
-            }
-            else if (_hintingMode == HINTING_MODE_DISABLED) {
-                flags |= FT_LOAD_NO_AUTOHINT | FT_LOAD_NO_HINTING;
-            }
-            // Allow users to disable color font rendering by toggling hinting mode off
-            if ( FT_HAS_COLOR(_face) && _hintingMode != HINTING_MODE_DISABLED )
-                flags |= FT_LOAD_COLOR;
-            hb_ft_font_set_load_flags(_hb_font, flags);
-        }
+        createHBFont();
         #endif
     }
+
+    #if USE_HARFBUZZ==1
+    /// (Re)create _hb_font for _face, matching our FreeType load flags and variations
+    bool createHBFont() {
+        if (_hb_font) {
+            hb_font_destroy(_hb_font);
+            _hb_font = NULL;
+        }
+        hb_font_t * ft_font = hb_ft_font_create(_face, NULL);
+        if (!ft_font)
+            return false;
+        // Use the same load flags as we do when using FT directly, to avoid mismatching advances & raster
+        int flags = FT_LOAD_DEFAULT;
+        flags |= (!_drawMonochrome ? FT_LOAD_TARGET_LIGHT : FT_LOAD_TARGET_MONO);
+        if (_hintingMode == HINTING_MODE_BYTECODE_INTERPRETOR) {
+            flags |= FT_LOAD_NO_AUTOHINT;
+        }
+        else if (_hintingMode == HINTING_MODE_AUTOHINT) {
+            flags |= FT_LOAD_FORCE_AUTOHINT;
+        }
+        else if (_hintingMode == HINTING_MODE_DISABLED) {
+            flags |= FT_LOAD_NO_AUTOHINT | FT_LOAD_NO_HINTING;
+        }
+        // Allow users to disable color font rendering by toggling hinting mode off
+        if ( FT_HAS_COLOR(_face) && _hintingMode != HINTING_MODE_DISABLED )
+            flags |= FT_LOAD_COLOR;
+        // (hb_ft_* functions need the hb_ft font itself, not the cmap cache sub-font)
+        hb_ft_font_set_load_flags(ft_font, flags);
+        // Apply variable font variations to the HarfBuzz font as well
+        if (!_variations.empty()) {
+            hb_variation_t hbvars[5]; // at most 5 standard axes
+            unsigned int nvar = 0;
+            if (_variations.wght_set) { hbvars[nvar].tag = LVFONT_TAG_WGHT; hbvars[nvar++].value = _variations.wght; }
+            if (_variations.opsz_set) { hbvars[nvar].tag = LVFONT_TAG_OPSZ; hbvars[nvar++].value = _variations.opsz; }
+            if (_variations.ital_set) { hbvars[nvar].tag = LVFONT_TAG_ITAL; hbvars[nvar++].value = _variations.ital; }
+            if (_variations.slnt_set) { hbvars[nvar].tag = LVFONT_TAG_SLNT; hbvars[nvar++].value = _variations.slnt; }
+            if (_variations.wdth_set) { hbvars[nvar].tag = LVFONT_TAG_WDTH; hbvars[nvar++].value = _variations.wdth; }
+            hb_font_set_variations(ft_font, hbvars, nvar);
+        }
+        _hb_font = hbFontWithCmapCache(ft_font);
+        return true;
+    }
+    #endif
     virtual hinting_mode_t  getHintingMode() const { return _hintingMode; }
 
     /// get/set bitmap mode (true=bitmap, false=antialiased)
@@ -2363,40 +2455,8 @@ public:
 
         #if USE_HARFBUZZ==1
         if (FT_Err_Ok == error) {
-            if (_hb_font)
-                hb_font_destroy(_hb_font);
-            _hb_font = hb_ft_font_create(_face, NULL);
-            if (!_hb_font) {
+            if (!createHBFont())
                 error = FT_Err_Invalid_Argument;
-            }
-            else {
-                // Use the same load flags as we do when using FT directly, to avoid mismatching advances & raster
-                int flags = FT_LOAD_DEFAULT;
-                flags |= (!_drawMonochrome ? FT_LOAD_TARGET_LIGHT : FT_LOAD_TARGET_MONO);
-                if (_hintingMode == HINTING_MODE_BYTECODE_INTERPRETOR) {
-                    flags |= FT_LOAD_NO_AUTOHINT;
-                }
-                else if (_hintingMode == HINTING_MODE_AUTOHINT) {
-                    flags |= FT_LOAD_FORCE_AUTOHINT;
-                }
-                else if (_hintingMode == HINTING_MODE_DISABLED) {
-                    flags |= FT_LOAD_NO_AUTOHINT | FT_LOAD_NO_HINTING;
-                }
-                if ( FT_HAS_COLOR(_face) && _hintingMode != HINTING_MODE_DISABLED )
-                    flags |= FT_LOAD_COLOR;
-                hb_ft_font_set_load_flags(_hb_font, flags);
-                // Apply variable font variations to the HarfBuzz font as well
-                if (!_variations.empty()) {
-                    hb_variation_t hbvars[5]; // at most 5 standard axes
-                    unsigned int nvar = 0;
-                    if (_variations.wght_set) { hbvars[nvar].tag = LVFONT_TAG_WGHT; hbvars[nvar++].value = _variations.wght; }
-                    if (_variations.opsz_set) { hbvars[nvar].tag = LVFONT_TAG_OPSZ; hbvars[nvar++].value = _variations.opsz; }
-                    if (_variations.ital_set) { hbvars[nvar].tag = LVFONT_TAG_ITAL; hbvars[nvar++].value = _variations.ital; }
-                    if (_variations.slnt_set) { hbvars[nvar].tag = LVFONT_TAG_SLNT; hbvars[nvar++].value = _variations.slnt; }
-                    if (_variations.wdth_set) { hbvars[nvar].tag = LVFONT_TAG_WDTH; hbvars[nvar++].value = _variations.wdth; }
-                    hb_font_set_variations(_hb_font, hbvars, nvar);
-                }
-            }
         }
         #endif
 
