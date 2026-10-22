@@ -5502,14 +5502,45 @@ public:
         return shift > 0 ? shift : 0;
     }
 
-    bool buildOptimalBreaks(src_text_fragment_t * para,
-                            const std::vector<bool> & hyphenation,
-                            std::vector<OptimalLineBreak> & result,
-                            bool allow_hyphens, int tolerance,
-                            bool allow_emergency_stretch,
-                            bool unlimited_stretch=false) {
-
+    // Per-paragraph data for buildOptimalBreaks(). It depends only on the
+    // paragraph (text, widths, indents, settings), not on a pass's tolerance
+    // or stretch options, so it is built once and shared by all passes.
+    struct OptimalBreakSetup {
         std::vector<OptimalBreakCandidate> candidates;
+        int regular_width;
+        int first_indent;
+        int following_indent;
+        bool if_not_first;
+        int last_align;
+        long long pruning_pct;
+        std::vector<int> space_count_prefix;
+        std::vector<int> space_width_prefix;
+        std::vector<int> end_capacity;
+        std::vector<int> end_width;
+        std::vector<int> end_last_char;
+        std::vector<int> end_hanging;
+        std::vector<int> start_pos;
+        std::vector<int> start_width_before;
+        std::vector<int> start_first_char;
+        std::vector<int> start_hanging;
+        std::vector<int> segment_minimum;
+        std::vector<int> segment_maximum;
+        std::vector<int> segment_minimum_excl;
+        std::vector<int> segment_maximum_excl;
+        std::vector<int> nonspace_start_max;
+        std::vector<int> sp_min;
+        std::vector<int> sp_max;
+        std::vector<long long> prune_threshold;
+    };
+    // Kept across paragraphs so its vectors keep their capacity.
+    OptimalBreakSetup m_optimal_setup;
+
+    bool prepareOptimalBreaks(src_text_fragment_t * para,
+                              const std::vector<bool> & hyphenation,
+                              bool allow_hyphens, OptimalBreakSetup & setup) {
+
+        std::vector<OptimalBreakCandidate> & candidates = setup.candidates;
+        candidates.clear();
         candidates.reserve(m_length / 2 + 8);
         for ( int i=0; i<m_length; i++ ) {
             if ( i == m_length-1 ) {
@@ -5538,8 +5569,10 @@ public:
         // absolute-width intervals so the planner models that exact operation,
         // rather than merely applying the same delta to unlike natural spaces.
         const int CAPACITY_INF = std::numeric_limits<int>::max() / 4;
-        std::vector<int> space_count_prefix(m_length + 1, 0);
-        std::vector<int> space_width_prefix(m_length + 1, 0);
+        std::vector<int> & space_count_prefix = setup.space_count_prefix;
+        space_count_prefix.assign(m_length + 1, 0);
+        std::vector<int> & space_width_prefix = setup.space_width_prefix;
+        space_width_prefix.assign(m_length + 1, 0);
         std::vector<int> space_minimum(m_length, -CAPACITY_INF);
         std::vector<int> space_maximum(m_length, CAPACITY_INF);
         for ( int i=0; i<m_length; i++ ) {
@@ -5560,12 +5593,12 @@ public:
             }
         }
 
-        int regular_width = getCurrentLineWidth();
-        int first_indent = m_indent_current;
-        int following_indent = m_indent_first_line_done ? m_indent_current
+        int regular_width = setup.regular_width = getCurrentLineWidth();
+        int first_indent = setup.first_indent = m_indent_current;
+        int following_indent = setup.following_indent = m_indent_first_line_done ? m_indent_current
                                                         : m_indent_after_first_line;
-        bool if_not_first = para->flags & LTEXT_LAST_LINE_IF_NOT_FIRST;
-        int last_align = (para->flags >> LTEXT_LAST_LINE_ALIGN_SHIFT) & LTEXT_FLAG_NEWLINE;
+        setup.if_not_first = para->flags & LTEXT_LAST_LINE_IF_NOT_FIRST;
+        setup.last_align = (para->flags >> LTEXT_LAST_LINE_ALIGN_SHIFT) & LTEXT_FLAG_NEWLINE;
 
         // Usable overflows depend only on m_y, which stays fixed while planning.
         int usable_left_overflow;
@@ -5580,22 +5613,34 @@ public:
         // As a line end: where capacity stops, natural width up to the
         // break (trailing space dropped, hyphen added), last visible char
         // and its hanging.
-        std::vector<int> end_capacity(candidate_count);
-        std::vector<int> end_width(candidate_count);
-        std::vector<int> end_last_char(candidate_count);
-        std::vector<int> end_hanging(candidate_count, 0);
+        std::vector<int> & end_capacity = setup.end_capacity;
+        end_capacity.assign(candidate_count, 0);
+        std::vector<int> & end_width = setup.end_width;
+        end_width.assign(candidate_count, 0);
+        std::vector<int> & end_last_char = setup.end_last_char;
+        end_last_char.assign(candidate_count, 0);
+        std::vector<int> & end_hanging = setup.end_hanging;
+        end_hanging.assign(candidate_count, 0);
         // As a line start (index previous+1): first char, width before it,
         // first visible char and its hanging.
-        std::vector<int> start_pos(candidate_count + 1);
-        std::vector<int> start_width_before(candidate_count + 1);
-        std::vector<int> start_first_char(candidate_count + 1);
-        std::vector<int> start_hanging(candidate_count + 1, 0);
+        std::vector<int> & start_pos = setup.start_pos;
+        start_pos.assign(candidate_count + 1, 0);
+        std::vector<int> & start_width_before = setup.start_width_before;
+        start_width_before.assign(candidate_count + 1, 0);
+        std::vector<int> & start_first_char = setup.start_first_char;
+        start_first_char.assign(candidate_count + 1, 0);
+        std::vector<int> & start_hanging = setup.start_hanging;
+        start_hanging.assign(candidate_count + 1, 0);
         // Word-space limits within each candidate's segment of text,
         // (previous candidate, this candidate], with and without its last char.
-        std::vector<int> segment_minimum(candidate_count);
-        std::vector<int> segment_maximum(candidate_count);
-        std::vector<int> segment_minimum_excl(candidate_count);
-        std::vector<int> segment_maximum_excl(candidate_count);
+        std::vector<int> & segment_minimum = setup.segment_minimum;
+        segment_minimum.assign(candidate_count, 0);
+        std::vector<int> & segment_maximum = setup.segment_maximum;
+        segment_maximum.assign(candidate_count, 0);
+        std::vector<int> & segment_minimum_excl = setup.segment_minimum_excl;
+        segment_minimum_excl.assign(candidate_count, 0);
+        std::vector<int> & segment_maximum_excl = setup.segment_maximum_excl;
+        segment_maximum_excl.assign(candidate_count, 0);
         std::vector<int> next_visible(m_length + 1);
         next_visible[m_length] = m_length;
         for ( int i=m_length-1; i>=0; i-- )
@@ -5660,16 +5705,6 @@ public:
                 segment_start = line_end + 1;
             }
         }
-        const long long INF = std::numeric_limits<long long>::max() / 8;
-        size_t state_count = candidates.size() * 4;
-        std::vector<long long> cost(state_count, INF);
-        std::vector<int> previous_candidate(state_count, -2);
-        std::vector<int> previous_fitness(state_count, -1);
-        std::vector<int> last_tracking_basis_points(state_count, 0);
-        // Whether any state of a candidate is reachable. Unreachable starts
-        // are skipped before any line arithmetic: their pairs never update
-        // a cost, so skipping them changes nothing but the time spent.
-        std::vector<char> reachable(candidate_count, 0);
 
         // Overfull pruning. Without it every candidate is paired with every
         // earlier one, which is quadratic in paragraph length.
@@ -5684,7 +5719,8 @@ public:
         // Both sides are monotonic in the line start (a prefix maximum keeps
         // the non-space width monotonic even with negative glyph advances),
         // so once one start is rejected every earlier start is too.
-        std::vector<int> nonspace_start_max(m_length + 1);
+        std::vector<int> & nonspace_start_max = setup.nonspace_start_max;
+        nonspace_start_max.assign(m_length + 1, 0);
         {
             int running = std::numeric_limits<int>::min();
             for ( int s=0; s<=m_length; s++ ) {
@@ -5693,14 +5729,10 @@ public:
                 nonspace_start_max[s] = running;
             }
         }
-        long long pruning_pct = m_kerning_mode == KERNING_MODE_HARFBUZZ
+        long long pruning_pct = setup.pruning_pct = m_kerning_mode == KERNING_MODE_HARFBUZZ
                 ? std::max(0, m_pbuffer->justify_tracking_shrink_percent) : 0;
         long long max_target = (long long)regular_width -
                 std::min(first_indent, following_indent);
-        const bool harfbuzz = m_kerning_mode == KERNING_MODE_HARFBUZZ;
-        const int tracking_shrink_percent = m_pbuffer->justify_tracking_shrink_percent;
-        const int tracking_stretch_percent = m_pbuffer->justify_tracking_stretch_percent;
-        const int tracking_delta_max_bp = m_pbuffer->justify_tracking_delta_max_bp;
 
         // Sparse tables over the segment word-space limits: the common
         // interval for any run of segments costs O(1), so only reachable
@@ -5708,8 +5740,10 @@ public:
         int sp_levels = 1;
         while ( (1 << sp_levels) <= candidate_count )
             sp_levels++;
-        std::vector<int> sp_min(sp_levels * candidate_count);
-        std::vector<int> sp_max(sp_levels * candidate_count);
+        std::vector<int> & sp_min = setup.sp_min;
+        sp_min.assign(sp_levels * candidate_count, 0);
+        std::vector<int> & sp_max = setup.sp_max;
+        sp_max.assign(sp_levels * candidate_count, 0);
         for ( int k=0; k<candidate_count; k++ ) {
             sp_min[k] = segment_minimum[k];
             sp_max[k] = segment_maximum[k];
@@ -5731,7 +5765,8 @@ public:
         // never moves back and one pointer serves all ends. This only skips
         // lines the checks below would reject anyway.
         const long long PRUNE_NEVER = std::numeric_limits<long long>::min() / 4;
-        std::vector<long long> prune_threshold(candidate_count);
+        std::vector<long long> & prune_threshold = setup.prune_threshold;
+        prune_threshold.assign(candidate_count, 0);
         {
             long long running = std::numeric_limits<long long>::max();
             for ( int c=candidate_count-1; c>=0; c-- ) {
@@ -5748,6 +5783,55 @@ public:
                 prune_threshold[c] = running;
             }
         }
+        return true;
+    }
+
+    bool buildOptimalBreaks(const OptimalBreakSetup & setup,
+                            std::vector<OptimalLineBreak> & result,
+                            int tolerance, bool allow_emergency_stretch,
+                            bool unlimited_stretch=false) {
+        // The search below reads the shared setup under its usual names.
+        const std::vector<OptimalBreakCandidate> & candidates = setup.candidates;
+        const std::vector<int> & space_count_prefix = setup.space_count_prefix;
+        const std::vector<int> & space_width_prefix = setup.space_width_prefix;
+        const std::vector<int> & end_capacity = setup.end_capacity;
+        const std::vector<int> & end_width = setup.end_width;
+        const std::vector<int> & end_last_char = setup.end_last_char;
+        const std::vector<int> & end_hanging = setup.end_hanging;
+        const std::vector<int> & start_pos = setup.start_pos;
+        const std::vector<int> & start_width_before = setup.start_width_before;
+        const std::vector<int> & start_first_char = setup.start_first_char;
+        const std::vector<int> & start_hanging = setup.start_hanging;
+        const std::vector<int> & segment_minimum = setup.segment_minimum;
+        const std::vector<int> & segment_maximum = setup.segment_maximum;
+        const std::vector<int> & segment_minimum_excl = setup.segment_minimum_excl;
+        const std::vector<int> & segment_maximum_excl = setup.segment_maximum_excl;
+        const std::vector<int> & nonspace_start_max = setup.nonspace_start_max;
+        const std::vector<int> & sp_min = setup.sp_min;
+        const std::vector<int> & sp_max = setup.sp_max;
+        const std::vector<long long> & prune_threshold = setup.prune_threshold;
+        const int regular_width = setup.regular_width;
+        const int first_indent = setup.first_indent;
+        const int following_indent = setup.following_indent;
+        const bool if_not_first = setup.if_not_first;
+        const int last_align = setup.last_align;
+        const long long pruning_pct = setup.pruning_pct;
+        const int candidate_count = (int)candidates.size();
+        const bool harfbuzz = m_kerning_mode == KERNING_MODE_HARFBUZZ;
+        const int tracking_shrink_percent = m_pbuffer->justify_tracking_shrink_percent;
+        const int tracking_stretch_percent = m_pbuffer->justify_tracking_stretch_percent;
+        const int tracking_delta_max_bp = m_pbuffer->justify_tracking_delta_max_bp;
+        const long long INF = std::numeric_limits<long long>::max() / 8;
+        size_t state_count = candidates.size() * 4;
+        std::vector<long long> cost(state_count, INF);
+        std::vector<int> previous_candidate(state_count, -2);
+        std::vector<int> previous_fitness(state_count, -1);
+        std::vector<int> last_tracking_basis_points(state_count, 0);
+        // Whether any state of a candidate is reachable. Unreachable starts
+        // are skipped before any line arithmetic: their pairs never update
+        // a cost, so skipping them changes nothing but the time spent.
+        std::vector<char> reachable(candidate_count, 0);
+
         auto foldSegments = [&](int lo, int hi, int & minimum, int & maximum) {
             int level = 31 - __builtin_clz(hi - lo + 1);
             const int * level_min = &sp_min[level * candidate_count];
@@ -6054,12 +6138,14 @@ public:
         // lines looser than the emergency stretch allows, so that one hard
         // line does not send the whole paragraph back to greedy breaking
         // (where none of the Knuth settings apply). Shrink limits stay hard.
+        if ( !prepareOptimalBreaks(para, hyphenation, true, m_optimal_setup) )
+            return false;
         std::vector<OptimalLineBreak> breaks;
-        bool found = buildOptimalBreaks(para, hyphenation, breaks, true,
+        bool found = buildOptimalBreaks(m_optimal_setup, breaks,
                     m_pbuffer->justify_pretolerance, false) ||
-                buildOptimalBreaks(para, hyphenation, breaks, true,
+                buildOptimalBreaks(m_optimal_setup, breaks,
                     m_pbuffer->justify_tolerance, true) ||
-                buildOptimalBreaks(para, hyphenation, breaks, true,
+                buildOptimalBreaks(m_optimal_setup, breaks,
                     10000, true, true);
         if ( !found )
             return false;
