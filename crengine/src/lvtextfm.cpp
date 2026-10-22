@@ -5184,6 +5184,11 @@ public:
         if ( getCurrentLineX() != 0 || getCurrentLineWidth() != m_pbuffer->width )
             return false;
         for ( int i=0; i<m_length; i++ ) {
+            // Inline pads (margin/border/padding of inline elements, such as
+            // styled footnote references) are fixed-width boxes: measureText()
+            // has put their width in m_widths and set their wrap flags.
+            if ( isPadChar(i) )
+                continue;
             if ( m_text[i] == '\n' ||
                     (m_flags[i] & (LCHAR_IS_OBJECT|LCHAR_IS_CJK|LCHAR_IS_FLEXIBLE_WIDTH_CJK)) )
                 return false;
@@ -5271,7 +5276,15 @@ public:
     // visible char, so the planner can compute each once per candidate
     // instead of once per (start, end) pair. Together they reproduce what
     // addLine() applies. (getHangingPercent()'s last argument is unused.)
+    // addLine() only hangs text words, so a line starting or ending with a
+    // pad gets no hanging. (A pad's src is an object: its t.font is not a font.)
+    bool isPadChar(int i) {
+        return (m_flags[i] & LCHAR_IS_OBJECT) && m_charindex[i] == PAD_CHAR_INDEX;
+    }
+
     int getOptimalLeftHanging(int first_char, int usable_left_overflow) {
+        if ( isPadChar(first_char) )
+            return 0;
         src_text_fragment_t * first_src = m_srcs[first_char];
         LVFont * first_font = first_src ? (LVFont *)first_src->t.font : NULL;
         if ( !first_font || (m_flags[first_char] & LCHAR_LOCKED_SPACING) ||
@@ -5303,6 +5316,8 @@ public:
 
     int getOptimalRightHanging(int last_char, bool hyphenated,
                                int usable_right_overflow) {
+        if ( isPadChar(last_char) )
+            return 0;
         src_text_fragment_t * last_src = m_srcs[last_char];
         LVFont * last_font = last_src ? (LVFont *)last_src->t.font : NULL;
         if ( !last_font || last_font->getFontFamily() == css_ff_monospace )
