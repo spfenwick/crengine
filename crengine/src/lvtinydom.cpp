@@ -5632,6 +5632,9 @@ bool ldomDocument::render( LVRendPageList * pages, LVDocViewCallback * callback,
 //        CRLog::debug("Style hash before setRenderProps: %x", styleHash);
 //    } //bool propsChanged =
     setRenderProps( width, dy, showCover, y0, def_font, def_interline_space, props );
+    // Hyphenation settings or dictionaries may have changed since the last
+    // (full or partial) rendering.
+    LFormattedText::clearHyphenationCache();
 
     // update styles
 //    if ( getRootNode()->getStyle().isNull() || getRootNode()->getFont().isNull()
