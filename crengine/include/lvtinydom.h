@@ -754,6 +754,10 @@ public:
         _justifyEmergencyStretchPercent = emergencyStretchPercent;
         _justifyLastLineMinPercent = lastLineMinPercent;
         _justifyTrackingDeltaMaxBp = trackingDeltaMaxBp;
+        // Only Knuth-Plass mode reads these: in greedy mode, keep the new
+        // values for later but don't re-render.
+        if (_lineBreakingMode == 0)
+            return false;
         _renderedBlockCache.clear();
         return true;
     }

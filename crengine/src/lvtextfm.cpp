@@ -3262,7 +3262,9 @@ public:
 
         // We might want to prevent this when LangCfg == "de" (in german,
         // letter spacing is used for emphasis)
-        if ( m_pbuffer->line_breaking_mode == 0 &&
+        // Knuth-planned paragraphs have their own tracking; every other
+        // paragraph keeps the legacy letter spacing aid.
+        if ( !m_para_optimized &&
                         m_pbuffer->max_added_letter_spacing_percent > 0 // only if allowed
                         && alignment == LTEXT_ALIGN_WIDTH    // only when justifying
                         && frmline->word_count > 1           // not if single word (expanded, but not taking the full width is ugly)
@@ -5280,6 +5282,18 @@ public:
         OptimalLineBreak(int p, bool h) : pos(p), hyphenated(h) {}
     };
 
+    // Whether a line break after pos makes the next line start with a copy
+    // of that real hyphen (same conditions as the greedy loop).
+    bool duplicatesHyphenAfter(int pos) {
+    #if (USE_LIBUNIBREAK==1)
+        return pos >= 0 && pos + 1 < m_length - 1 &&
+                (m_text[pos] == '-' || m_text[pos] == UNICODE_HYPHEN) &&
+                m_srcs[pos]->lang_cfg->duplicateRealHyphenOnNextLine();
+    #else
+        return false;
+    #endif
+    }
+
     bool canOptimizeParagraph(src_text_fragment_t * para, bool preFormattedOnly) {
         if ( m_pbuffer->line_breaking_mode != 1 || preFormattedOnly ||
                 m_length < 1 || m_length > 4096 )
@@ -5309,8 +5323,10 @@ public:
                                         LTEXT_FLAG_NOWRAP|LTEXT_LOCKED_SPACING|
                                         LTEXT_IS_FIRST_LINE_CLONE)) )
                 return false;
+            // Ignorable chars are never drawn, so their font coverage
+            // does not matter.
             if ( m_kerning_mode == KERNING_MODE_HARFBUZZ &&
-                    !(m_flags[i] & LCHAR_IS_SPACE) ) {
+                    !(m_flags[i] & (LCHAR_IS_SPACE|LCHAR_IS_TO_IGNORE)) ) {
                 LVFont * font = (LVFont *)src->t.font;
                 if ( !font || !font->hasGlyph(m_text[i]) )
                     return false;
@@ -5587,6 +5603,11 @@ public:
         int max_start_hanging = 0;
         for ( int k=0; k<=candidate_count; k++ ) {
             int line_start = k > 0 ? candidates[k-1].pos + 1 : 0;
+            // A repeated real hyphen is part of the next line's width.
+            // Starts stay strictly increasing, as pruning requires.
+            if ( k > 0 && !candidates[k-1].hyphenated &&
+                    duplicatesHyphenAfter(candidates[k-1].pos) )
+                line_start--;
             start_pos[k] = line_start;
             start_width_before[k] = line_start > 0 ? m_widths[line_start-1] : 0;
             start_first_char[k] = line_start < m_length ? next_visible[line_start] : m_length;
@@ -6059,6 +6080,12 @@ public:
                     wrap_pos >= m_length-1, preFormattedOnly, isLastPara, false);
             m_flags[wrap_pos] = saved_flags;
             pos = wrap_pos + 1;
+            if ( !breaks[i].hyphenated && duplicatesHyphenAfter(wrap_pos) ) {
+                // Have that hyphen also start the next line, as the planner
+                // assumed, and never break after the copy.
+                pos--;
+                m_flags[pos] &= ~LCHAR_ALLOW_WRAP_AFTER;
+            }
         }
         m_para_optimized = false;
         return pos >= m_length;
