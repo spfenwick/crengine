@@ -18910,23 +18910,26 @@ lUInt32 tinyNodeCollection::calcStyleHash(bool already_rendered, lUInt32 force_n
     res = res * 31 + _unusedSpaceThresholdPercent;
     // Knuth-Plass line breaking changes line breaks, paragraph heights and
     // pagination, so it must invalidate any rendering made with another
-    // mode or configuration.
-    res = res * 31 + _lineBreakingMode;
-    res = res * 31 + _justifySpaceShrinkPercent;
-    res = res * 31 + _justifySpaceStretchPercent;
-    res = res * 31 + _justifyTrackingShrinkPercent;
-    res = res * 31 + _justifyTrackingStretchPercent;
-    res = res * 31 + _justifyPretolerance;
-    res = res * 31 + _justifyTolerance;
-    res = res * 31 + _justifyHyphenPenalty;
-    res = res * 31 + _justifyExplicitHyphenPenalty;
-    res = res * 31 + _justifyLinePenalty;
-    res = res * 31 + _justifyAdjacentDemerits;
-    res = res * 31 + _justifyDoubleHyphenDemerits;
-    res = res * 31 + _justifyFinalHyphenDemerits;
-    res = res * 31 + _justifyEmergencyStretchPercent;
-    res = res * 31 + _justifyLastLineMinPercent;
-    res = res * 31 + _justifyTrackingDeltaMaxBp;
+    // mode or configuration. Greedy mode ignores these settings: leave the
+    // hash as it was without them, so existing caches stay valid.
+    if ( _lineBreakingMode != 0 ) {
+        res = res * 31 + _lineBreakingMode;
+        res = res * 31 + _justifySpaceShrinkPercent;
+        res = res * 31 + _justifySpaceStretchPercent;
+        res = res * 31 + _justifyTrackingShrinkPercent;
+        res = res * 31 + _justifyTrackingStretchPercent;
+        res = res * 31 + _justifyPretolerance;
+        res = res * 31 + _justifyTolerance;
+        res = res * 31 + _justifyHyphenPenalty;
+        res = res * 31 + _justifyExplicitHyphenPenalty;
+        res = res * 31 + _justifyLinePenalty;
+        res = res * 31 + _justifyAdjacentDemerits;
+        res = res * 31 + _justifyDoubleHyphenDemerits;
+        res = res * 31 + _justifyFinalHyphenDemerits;
+        res = res * 31 + _justifyEmergencyStretchPercent;
+        res = res * 31 + _justifyLastLineMinPercent;
+        res = res * 31 + _justifyTrackingDeltaMaxBp;
+    }
     res = res * 31 + _cjkWidthScalePercent;
 
     // _maxAddedLetterSpacingPercent does not need to be accounted, as, working
