@@ -430,6 +430,64 @@ void LFormattedText::AddSourceObject(
     //   width) and can better apply values in %
 }
 
+// Hyphenation points of recently seen words, for the paragraph planner, which
+// hyphenates every word of a paragraph rather than only the one meeting the
+// line end. Each word maps to a fixed slot (a newer word replaces an older
+// one), so lookups never allocate. Hyphenation settings, dictionaries and
+// methods only change between document renders, and
+// ldomDocument::render() clears this cache.
+class OptimalHyphenationCache {
+public:
+    enum { SLOT_COUNT = 4096, MAX_WORD_LEN = 22 };
+    struct Slot {
+        HyphMethod * method;
+        lUInt64 points; // bit i: a hyphen may follow char i
+        int len;
+        lChar32 word[MAX_WORD_LEN];
+    };
+    // Returns the slot for this word: matching it if slot->len > 0, or to
+    // fill with store(). NULL for words too long to cache.
+    Slot * find(HyphMethod * method, const lChar32 * word, int len) {
+        if ( len > MAX_WORD_LEN )
+            return NULL;
+        if ( !_slots ) {
+            _slots = (Slot *)calloc(SLOT_COUNT, sizeof(Slot));
+            if ( !_slots )
+                return NULL;
+        }
+        lUInt32 hash = 2166136261u ^ (lUInt32)(size_t)method;
+        for ( int i=0; i<len; i++ )
+            hash = (hash ^ word[i]) * 16777619u;
+        Slot * slot = &_slots[(hash ^ (hash >> 15)) & (SLOT_COUNT - 1)];
+        bool match = slot->method == method && slot->len == len &&
+                memcmp(slot->word, word, len * sizeof(lChar32)) == 0;
+        if ( !match )
+            slot->len = 0;
+        return slot;
+    }
+    static void store(Slot * slot, HyphMethod * method, const lChar32 * word,
+                      int len, lUInt64 points) {
+        slot->method = method;
+        slot->points = points;
+        slot->len = len;
+        memcpy(slot->word, word, len * sizeof(lChar32));
+    }
+    void clear() {
+        free(_slots);
+        _slots = NULL;
+    }
+    OptimalHyphenationCache() : _slots(NULL) { }
+    ~OptimalHyphenationCache() { clear(); }
+private:
+    Slot * _slots;
+};
+static OptimalHyphenationCache optimalHyphenationCache;
+
+void LFormattedText::clearHyphenationCache()
+{
+    optimalHyphenationCache.clear();
+}
+
 class LVFormatter {
 public:
     //LVArray<lUInt16>  widths_buf;
@@ -5207,6 +5265,38 @@ public:
         return true;
     }
 
+    // Hyphenation points of the word at m_text[wstart, wstart+len), as a bit
+    // mask (bit i: a hyphen may follow char wstart+i). len <= MAX_WORD_SIZE.
+    lUInt64 getWordHyphenationPoints(src_text_fragment_t * src, int wstart, int len) {
+        HyphMethod * method = src->lang_cfg->getHyphMethod();
+        // With a maxWidth of 0xFFFF, the glyph widths passed below never
+        // change the result: the word alone decides, so it can be cached.
+        OptimalHyphenationCache::Slot * slot =
+                optimalHyphenationCache.find(method, m_text+wstart, len);
+        if ( slot && slot->len )
+            return slot->points;
+        lUInt16 widths[MAX_WORD_SIZE];
+        lUInt16 flags[MAX_WORD_SIZE];
+        memset(flags, 0, sizeof(flags));
+        int word_start_width = wstart > 0 ? m_widths[wstart-1] : 0;
+        for ( int i=0; i<len; i++ ) {
+            int width = m_widths[wstart+i] - word_start_width;
+            widths[i] = width < 0xFFFF ? width : 0xFFFF;
+        }
+        LVFont * font = (LVFont *)src->t.font;
+        int hyphen_width = font ? font->getHyphenWidth() : 0;
+        method->hyphenate(m_text+wstart, len, widths, (lUInt8 *)flags,
+                          hyphen_width, 0xFFFF, 2);
+        lUInt64 points = 0;
+        for ( int i=0; i<len; i++ ) {
+            if ( flags[i] & LCHAR_ALLOW_HYPH_WRAP_AFTER )
+                points |= (lUInt64)1 << i;
+        }
+        if ( slot )
+            OptimalHyphenationCache::store(slot, method, m_text+wstart, len, points);
+        return points;
+    }
+
     void findParagraphHyphenation(std::vector<bool> & hyphenation) {
         hyphenation.assign(m_length, false);
         int wordpos = m_length - 1;
@@ -5223,23 +5313,9 @@ public:
                 src_text_fragment_t * src = m_srcs[wstart];
                 if ( src && (src->flags & LTEXT_HYPHENATE) &&
                         !(src->flags & LTEXT_FLAG_NOWRAP) ) {
-                    lUInt16 widths[MAX_WORD_SIZE];
-                    lUInt16 flags[MAX_WORD_SIZE];
-                    memset(flags, 0, sizeof(flags));
-                    int word_start_width = wstart > 0 ? m_widths[wstart-1] : 0;
-                    for ( int i=0; i<len; i++ ) {
-                        int width = m_widths[wstart+i] - word_start_width;
-                        widths[i] = width < 0xFFFF ? width : 0xFFFF;
-                    }
-                    LVFont * font = (LVFont *)src->t.font;
-                    int hyphen_width = font ? font->getHyphenWidth() : 0;
-                    src->lang_cfg->getHyphMethod()->hyphenate(
-                            m_text+wstart, len, widths, (lUInt8 *)flags,
-                            hyphen_width, 0xFFFF, 2);
-                    for ( int i=0; i<len; i++ ) {
-                        if ( flags[i] & LCHAR_ALLOW_HYPH_WRAP_AFTER )
-                            hyphenation[wstart+i] = true;
-                    }
+                    lUInt64 points = getWordHyphenationPoints(src, wstart, len);
+                    for ( ; points; points &= points-1 )
+                        hyphenation[wstart + __builtin_ctzll(points)] = true;
                 }
             }
             if ( wstart <= 0 )
@@ -5509,10 +5585,6 @@ public:
                 segment_start = line_end + 1;
             }
         }
-        // Scratch for the current candidate's window, indexed by previous+1.
-        std::vector<int> window_minimum(candidate_count + 1);
-        std::vector<int> window_maximum(candidate_count + 1);
-
         const long long INF = std::numeric_limits<long long>::max() / 8;
         size_t state_count = candidates.size() * 4;
         std::vector<long long> cost(state_count, INF);
@@ -5555,50 +5627,95 @@ public:
         const int tracking_stretch_percent = m_pbuffer->justify_tracking_stretch_percent;
         const int tracking_delta_max_bp = m_pbuffer->justify_tracking_delta_max_bp;
 
+        // Sparse tables over the segment word-space limits: the common
+        // interval for any run of segments costs O(1), so only reachable
+        // starts are visited instead of every start that might fit.
+        int sp_levels = 1;
+        while ( (1 << sp_levels) <= candidate_count )
+            sp_levels++;
+        std::vector<int> sp_min(sp_levels * candidate_count);
+        std::vector<int> sp_max(sp_levels * candidate_count);
+        for ( int k=0; k<candidate_count; k++ ) {
+            sp_min[k] = segment_minimum[k];
+            sp_max[k] = segment_maximum[k];
+        }
+        for ( int l=1; l<sp_levels; l++ ) {
+            int half = 1 << (l-1);
+            int * dmin = &sp_min[l*candidate_count];
+            int * dmax = &sp_max[l*candidate_count];
+            const int * smin = &sp_min[(l-1)*candidate_count];
+            const int * smax = &sp_max[(l-1)*candidate_count];
+            for ( int k=0; k + (1<<l) <= candidate_count; k++ ) {
+                dmin[k] = std::max(smin[k], smin[k+half]);
+                dmax[k] = std::min(smax[k], smax[k+half]);
+            }
+        }
+        // The overfull bound above, made monotone in the line end too: a
+        // start is skipped only when the bound rejects it for this end and
+        // every later one (a suffix minimum), so the earliest viable start
+        // never moves back and one pointer serves all ends. This only skips
+        // lines the checks below would reject anyway.
+        const long long PRUNE_NEVER = std::numeric_limits<long long>::min() / 4;
+        std::vector<long long> prune_threshold(candidate_count);
+        {
+            long long running = std::numeric_limits<long long>::max();
+            for ( int c=candidate_count-1; c>=0; c-- ) {
+                int le = candidates[c].pos;
+                long long value = PRUNE_NEVER;
+                if ( le > 0 && pruning_pct < 100 ) {
+                    long long r = std::min(m_widths[le-1] - space_width_prefix[le],
+                                           m_widths[le] - space_width_prefix[le+1]);
+                    value = r * (100 - pruning_pct) -
+                            (long long)space_width_prefix[le+1] * pruning_pct -
+                            (max_target + max_start_hanging + end_hanging[c]) * 100;
+                }
+                running = std::min(running, value);
+                prune_threshold[c] = running;
+            }
+        }
+        auto foldSegments = [&](int lo, int hi, int & minimum, int & maximum) {
+            int level = 31 - __builtin_clz(hi - lo + 1);
+            const int * level_min = &sp_min[level * candidate_count];
+            const int * level_max = &sp_max[level * candidate_count];
+            int other = hi - (1 << level) + 1;
+            minimum = std::max(minimum, std::max(level_min[lo], level_min[other]));
+            maximum = std::min(maximum, std::min(level_max[lo], level_max[other]));
+        };
+        // Candidates with at least one reachable state, ascending.
+        std::vector<int> reachable_list;
+        reachable_list.reserve(candidate_count);
+        size_t reachable_from = 0;
+        int earliest_previous = -1;
+
         for ( int current=0; current<candidate_count; current++ ) {
             const OptimalBreakCandidate & cur = candidates[current];
             const int line_end = cur.pos;
             const int capacity_end = end_capacity[current];
-            // Descending scan: find the earliest start that can still fit,
-            // folding each start's word-space limits on the way.
-            int window_min = capacity_end == line_end + 1
+            const int own_min = capacity_end == line_end + 1
                     ? segment_minimum[current] : segment_minimum_excl[current];
-            int window_max = capacity_end == line_end + 1
+            const int own_max = capacity_end == line_end + 1
                     ? segment_maximum[current] : segment_maximum_excl[current];
-            // Non-space width from the paragraph start to this break, as
-            // used by the nonspace_start_max bound (both endings counted).
-            long long reach = line_end > 0
-                    ? std::min(m_widths[line_end-1] - space_width_prefix[line_end],
-                               m_widths[line_end] - space_width_prefix[line_end+1]) : 0;
-            long long spaces_upto = space_width_prefix[line_end+1];
-            long long pruning_limit = (max_target + max_start_hanging +
-                    end_hanging[current]) * 100;
-            int first_previous = -1;
-            for ( int previous=current-1; previous>=-1; previous-- ) {
-                int line_start = start_pos[previous+1];
-                if ( line_end > 0 ) {
-                    long long nonspace = reach - nonspace_start_max[line_start];
-                    if ( nonspace * (100 - pruning_pct) - spaces_upto * pruning_pct
-                            > pruning_limit ) {
-                        first_previous = previous + 1;
-                        break;
-                    }
-                }
-                window_minimum[previous+1] = window_min;
-                window_maximum[previous+1] = window_max;
-                if ( previous >= 0 ) {
-                    window_min = std::max(window_min, segment_minimum[previous]);
-                    window_max = std::min(window_max, segment_maximum[previous]);
-                }
-            }
+            while ( earliest_previous < current &&
+                    (100 - pruning_pct) *
+                    (long long)nonspace_start_max[start_pos[earliest_previous+1]]
+                        < prune_threshold[current] )
+                earliest_previous++;
+            while ( reachable_from < reachable_list.size() &&
+                    reachable_list[reachable_from] < earliest_previous )
+                reachable_from++;
             bool any_reachable = false;
-            // Keep ascending order so ties resolve exactly as before.
-            for ( int previous=first_previous; previous<current; previous++ ) {
-                if ( previous >= 0 && !reachable[previous] )
-                    continue;
+            // Ascending order, so ties resolve exactly as before.
+            for ( int idx = earliest_previous < 0 ? -1 : (int)reachable_from;
+                    idx < (int)reachable_list.size(); idx++ ) {
+                int previous = idx < 0 ? -1 : reachable_list[idx];
                 int line_start = start_pos[previous+1];
                 if ( line_start > line_end )
                     continue;
+                // Word-space limits of every segment on this line.
+                int window_lo = own_min;
+                int window_hi = own_max;
+                if ( previous + 1 <= current - 1 )
+                    foldSegments(previous + 1, current - 1, window_lo, window_hi);
                 int natural_width = end_width[current] -
                         start_width_before[previous+1];
                 // Account for the exact left/right punctuation (or hyphen)
@@ -5635,8 +5752,8 @@ public:
                 if ( space_count > 0 ) {
                     natural_space_total = space_width_prefix[capacity_end] -
                                           space_width_prefix[line_start];
-                    minimum_common_space = window_minimum[previous+1];
-                    maximum_common_space = window_maximum[previous+1];
+                    minimum_common_space = window_lo;
+                    maximum_common_space = window_hi;
                     if ( minimum_common_space > maximum_common_space ) {
                         // Integer rasterisation can make nominally identical
                         // spaces differ by a pixel (and mixed fonts can differ
@@ -5817,6 +5934,8 @@ public:
                 }
             }
             reachable[current] = any_reachable;
+            if ( any_reachable )
+                reachable_list.push_back(current);
         }
 
         int final_candidate = (int)candidates.size() - 1;
