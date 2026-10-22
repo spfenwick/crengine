@@ -4575,6 +4575,30 @@ public:
                 x_64 += tracking_width_done_x64 - tracking_width_done * 64;
                 x = FONT_METRIC_TO_PX(x_64);
             }
+            // Move the pen by the tracking of the next n glyph gaps, along
+            // the same line-wide accumulator layout used.
+            auto advanceTracking = [&](int n) {
+                if ( n <= 0 || tracking_points_done >= tracking_points )
+                    return;
+                tracking_points_done += n;
+                if ( tracking_points_done > tracking_points )
+                    tracking_points_done = tracking_points;
+                int target_done = tracking_width *
+                        tracking_points_done / tracking_points;
+                if ( use_fractional_positioning ) {
+                    int target_done_x64 = knuthDistributedTrackingX64(
+                            tracking_width, tracking_points_done,
+                            tracking_points);
+                    x_64 += target_done_x64 - tracking_width_done_x64;
+                    x = FONT_METRIC_TO_PX(x_64);
+                    tracking_width_done_x64 = target_done_x64;
+                }
+                else {
+                    x += target_done - tracking_width_done;
+                    x_64 = x * 64;
+                }
+                tracking_width_done = target_done;
+            };
             while (hg < glyph_count) { // hg is the start of a new cluster at this point
                 bool draw_with_fallback = false;
                 int hcl = glyph_info[hg].cluster;
@@ -4672,6 +4696,9 @@ public:
                     // Adjust DrawTextString() params for fallback drawing
                     lUInt32 fb_flags = flags | LFNT_HINT_IS_FALLBACK_FONT;
                     fb_flags &= ~LFNT_DRAW_DECORATION_MASK; // main font will do text decoration
+                    // The fallback font has no view of this line's tracking
+                    // accumulator: let it draw naturally, and catch up below.
+                    fb_flags &= ~LFNT_HINT_DISTRIBUTED_TRACKING;
                     // We must keep direction, but we should drop BOT/EOT flags
                     // if this segment is not at start/end (this might be bogus
                     // if the char at start or end is a space that could be drawn
@@ -4693,6 +4720,19 @@ public:
                        width, text_decoration_back_gap, target_w, target_h, svg_collector );
                     x += fb_advance;
                     x_64 = x * 64;
+                    if ( tracking_points > 0 ) {
+                        // Apply the tracking this font would have added after
+                        // each of the skipped clusters, so the following
+                        // glyphs land where layout put them.
+                        int fb_clusters = 0;
+                        for (int k = hg; k < hg2; k++) {
+                            if ( k == hg || glyph_info[k].cluster != glyph_info[k-1].cluster )
+                                fb_clusters++;
+                        }
+                        if ( hg2 >= glyph_count )
+                            fb_clusters--; // no gap after the last cluster
+                        advanceTracking(fb_clusters);
+                    }
                     #ifdef DEBUG_DRAW_TEXT
                         printf("DTHB ### drawn past notdef > X+= %d\n[...]", fb_advance);
                     #endif
@@ -4860,28 +4900,8 @@ public:
                             x += letter_spacing;
                             x_64 = x * 64;
                         }
-                        if ( tracking_points_done < tracking_points &&
-                                hg2 < glyph_count ) {
-                            tracking_points_done++;
-                            int target_done = tracking_width *
-                                    tracking_points_done / tracking_points;
-                            if ( use_fractional_positioning ) {
-                                int target_done_x64 = knuthDistributedTrackingX64(
-                                        tracking_width, tracking_points_done,
-                                        tracking_points);
-                                x_64 += target_done_x64 -
-                                        tracking_width_done_x64;
-                                x = FONT_METRIC_TO_PX(x_64);
-                                tracking_width_done_x64 = target_done_x64;
-                            }
-                            else {
-                                int tracking_delta = target_done -
-                                        tracking_width_done;
-                                x += tracking_delta;
-                                x_64 = x * 64;
-                            }
-                            tracking_width_done = target_done;
-                        }
+                        if ( hg2 < glyph_count )
+                            advanceTracking(1);
                     }
                 }
                 hg = hg2;
