@@ -1674,6 +1674,7 @@ protected:
     LVFontGlyphUnsignedMetricCache   _wcache;   // glyph width cache
     LVFontGlyphSignedMetricCache     _lsbcache; // glyph left side bearing cache
     LVFontGlyphSignedMetricCache     _rsbcache; // glyph right side bearing cache
+    LVFontGlyphUnsignedMetricCache   _hasglyph_cache; // 1/0: char in this face's cmap
     LVFontLocalGlyphCache            _glyph_cache;
     bool           _drawMonochrome;
     hinting_mode_t _hintingMode;
@@ -1949,6 +1950,7 @@ public:
         _wcache.clear();
         _lsbcache.clear();
         _rsbcache.clear();
+        _hasglyph_cache.clear();
         #if USE_HARFBUZZ==1
         _glyph_cache2.clear();
         _width_cache2.clear();
@@ -2589,7 +2591,13 @@ public:
 
     virtual bool hasGlyph( lUInt32 code, bool is_fallback=false ) {
         // Mirrors the lookup in getGlyphInfo() without FT_Load_Glyph.
-        if ( getCharIndex( code, 0 ) != 0 )
+        // Only this face's own answer is cached: fallbacks are asked live.
+        lUInt16 cached = _hasglyph_cache.get( code );
+        if ( cached == CACHED_UNSIGNED_METRIC_NOT_SET ) {
+            cached = getCharIndex( code, 0 ) != 0 ? 1 : 0;
+            _hasglyph_cache.put( code, cached );
+        }
+        if ( cached )
             return true;
         LVFontRef fallback = is_fallback ? getNextFallbackFont() : getFallbackFont();
         if ( !fallback )
