@@ -428,6 +428,9 @@ private:
 public:
     formatted_text_fragment_t * GetBuffer() { return m_pbuffer; }
 
+    /// drop cached hyphenation points (hyphenation settings may have changed)
+    static void clearHyphenationCache();
+
     /// set strut height and baseline (line boxes starting minimal values)
     void setStrut(lUInt16 height, lUInt16 baseline) {
         m_pbuffer->strut_height = height;
