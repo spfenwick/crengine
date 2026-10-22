@@ -535,6 +535,7 @@ public:
     bool m_has_bidi; // true when Bidi (or pure RTL) detected
     bool m_para_dir_is_rtl; // boolean shortcut of m_para_bidi_type
     bool m_has_cjk; // true when some CJK met
+    bool m_para_optimized; // true while lines of a Knuth-planned paragraph are being added
     int  m_cjk_prev_line_added_space_div; // Used with CJK justified lines, to
     int  m_cjk_prev_line_added_space_mod; // apply same spacing on last line.
     lUInt32 m_formatted_initial_letter_id;
@@ -599,6 +600,7 @@ public:
         m_initial_letter_exclusion.start_y = 0;
         m_initial_letter_exclusion.end_y = 0;
         m_has_cjk = false;
+        m_para_optimized = false;
         m_cjk_prev_line_added_space_div = 0;
         m_cjk_prev_line_added_space_mod = 0;
         m_specified_para_dir = REND_DIRECTION_UNSET;
@@ -2830,26 +2832,53 @@ public:
 #define MIN_WORD_LEN_TO_HYPHENATE 4
 #define MAX_WORD_SIZE 64
 
+    // Glyph gaps of this word that distributed tracking may adjust. Only the
+    // HarfBuzz draw path implements LFNT_HINT_DISTRIBUTED_TRACKING, and
+    // MathML stretched glyphs and scaled CJK glyphs already use the
+    // target_w/target_h draw arguments for their own data.
+    int getDistributedTrackingPoints(formatted_word_t * word)
+    {
+        if ( m_kerning_mode != KERNING_MODE_HARFBUZZ || word->distinct_glyphs <= 1 ||
+                (word->flags & (LTEXT_WORD_IS_CJK|LTEXT_WORD_IS_IMAGE|LTEXT_WORD_IS_INLINE_BOX|LTEXT_WORD_IS_PAD)) )
+            return 0;
+        src_text_fragment_t * src = &m_pbuffer->srctext[word->src_text_index];
+        if ( src->flags & LTEXT_MATH_TRANSFORM )
+            return 0;
+        return word->distinct_glyphs - 1;
+    }
+
     int countDistributedTrackingPoints(formatted_line_t * frmline)
     {
         int points = 0;
-        for ( int i=0; i<(int)frmline->word_count; i++ ) {
-            formatted_word_t * word = &frmline->words[i];
-            if ( word->distinct_glyphs > 1 )
-                points += word->distinct_glyphs - 1;
-        }
+        for ( int i=0; i<(int)frmline->word_count; i++ )
+            points += getDistributedTrackingPoints(&frmline->words[i]);
         return points;
     }
 
-    /// align line: add or reduce widths of spaces to achieve desired text alignment
-    int applyDistributedTracking(formatted_line_t * frmline, int requested_width)
+    // Most tracking the line may take, in the same terms as the planner:
+    // a percentage of the line's natural width.
+    int getDistributedTrackingLimit(int natural_width, bool shrink)
     {
-        // Keep Max + = 0 a renderer-level invariant. Planner and word-space
-        // rounding should normally have removed any positive remainder, but
-        // no future fallback path may turn one into expanded letters.
-        if ( requested_width > 0 &&
-                m_pbuffer->justify_tracking_stretch_percent == 0 )
+        int percent = shrink ? m_pbuffer->justify_tracking_shrink_percent
+                             : m_pbuffer->justify_tracking_stretch_percent;
+        if ( percent <= 0 || natural_width <= 0 )
             return 0;
+        return natural_width * percent / 100;
+    }
+
+    /// align line: add or reduce widths of spaces to achieve desired text alignment
+    int applyDistributedTracking(formatted_line_t * frmline, int requested_width,
+                                 int natural_width)
+    {
+        // Never exceed the configured limits: a line the planner did not
+        // fully fit is better left slightly short or overflowing than drawn
+        // with overlapping or visibly spread-out glyphs. This also keeps
+        // Max + = 0 a renderer-level invariant.
+        int limit = getDistributedTrackingLimit(natural_width, requested_width < 0);
+        if ( requested_width > limit )
+            requested_width = limit;
+        else if ( requested_width < -limit )
+            requested_width = -limit;
         int tracking_points = countDistributedTrackingPoints(frmline);
         for ( int i=0; i<(int)frmline->word_count; i++ ) {
             formatted_word_t * word = &frmline->words[i];
@@ -2866,8 +2895,7 @@ public:
         for ( int i=0; i<(int)frmline->word_count; i++ ) {
             formatted_word_t * word = &frmline->words[i];
             word->x += shift_x;
-            int points = word->distinct_glyphs > 1
-                    ? word->distinct_glyphs - 1 : 0;
+            int points = getDistributedTrackingPoints(word);
             int start_width = requested_width * points_done / tracking_points;
             int end_width = requested_width * (points_done + points) /
                     tracking_points;
@@ -2927,6 +2955,7 @@ public:
 
     int applyOptimizedJustification(formatted_line_t * frmline, int extra_width)
     {
+        int natural_width = frmline->width;
         int spaces = 0;
         int natural_space_total = 0;
         int min_common_space = 1;
@@ -2954,7 +2983,7 @@ public:
             if ( extra_width > 0 &&
                     m_pbuffer->justify_tracking_stretch_percent == 0 )
                 return 0;
-            return applyDistributedTracking(frmline, extra_width);
+            return applyDistributedTracking(frmline, extra_width, natural_width);
         }
 
         // Pick one absolute space width. Emergency stretch must actually be
@@ -2964,8 +2993,7 @@ public:
         int desired_space_total = natural_space_total + extra_width;
         int tracking_points = countDistributedTrackingPoints(frmline);
         int tracking_shrink_capacity = tracking_points > 0
-                ? frmline->width *
-                  m_pbuffer->justify_tracking_shrink_percent / 100 : 0;
+                ? getDistributedTrackingLimit(natural_width, true) : 0;
         bool emergency_stretch = min_common_space <= max_common_space &&
                 (long long)desired_space_total >
                 (long long)max_common_space * spaces;
@@ -2984,11 +3012,34 @@ public:
         }
         int applied = applyFixedWordSpacing(frmline, target_space);
         int remaining = extra_width - applied;
+        if ( tracking_points == 0 && remaining > 0 ) {
+            // No tracking sink (e.g. not HarfBuzz): spread the downward
+            // rounding remainder as single pixels over the word gaps, as
+            // the legacy justification does, to keep the right edge flush.
+            int extra = std::min(remaining, spaces);
+            int gap = 0;
+            int shift_x = 0;
+            for ( int i=0; i<(int)frmline->word_count; i++ ) {
+                formatted_word_t * word = &frmline->words[i];
+                word->x += shift_x;
+                if ( i < (int)frmline->word_count - 1 &&
+                        (word->flags & LTEXT_WORD_CAN_ADD_SPACE_AFTER) ) {
+                    int add = (gap+1) * extra / spaces - gap * extra / spaces;
+                    word->width += add;
+                    word->min_width += add;
+                    shift_x += add;
+                    gap++;
+                }
+            }
+            frmline->width += shift_x;
+            applied += shift_x;
+            remaining -= shift_x;
+        }
         if ( remaining > 0 &&
                 m_pbuffer->justify_tracking_stretch_percent == 0 )
             return applied;
         if ( remaining != 0 && tracking_points > 0 )
-            applied += applyDistributedTracking(frmline, remaining);
+            applied += applyDistributedTracking(frmline, remaining, natural_width);
         return applied;
     }
 
@@ -3334,7 +3385,10 @@ public:
         }
         extra_width = usable_width - frmline->width;
 
-        bool optimized_adjustment = m_pbuffer->line_breaking_mode == 1 &&
+        // Only lines whose breaks the Knuth planner chose: paragraphs it
+        // rejected were broken greedily, against the legacy space limits,
+        // and must be justified by the legacy code below.
+        bool optimized_adjustment = m_para_optimized &&
                 alignment == LTEXT_ALIGN_WIDTH && !m_has_cjk && !m_has_bidi &&
                 frmline->word_count > 1;
         if ( optimized_adjustment ) {
@@ -5990,6 +6044,7 @@ public:
             return false;
 
         int pos = 0;
+        m_para_optimized = true;
         for ( size_t i=0; i<breaks.size(); i++ ) {
             int x = m_indent_current;
             if ( !m_indent_first_line_done ) {
@@ -6005,6 +6060,7 @@ public:
             m_flags[wrap_pos] = saved_flags;
             pos = wrap_pos + 1;
         }
+        m_para_optimized = false;
         return pos >= m_length;
     }
 
@@ -7816,6 +7872,8 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
                         }
                     }
                     if ( (word->flags & LTEXT_WORD_HAS_DISTRIBUTED_TRACKING) &&
+                            !(srcline->flags & LTEXT_MATH_TRANSFORM) &&
+                            !(drawFlags & LFNT_HINT_CJK_SCALED_WIDTH) &&
                             word->distinct_glyphs > 1 &&
                             word->distributed_tracking_points > 0 ) {
                         drawFlags |= LFNT_HINT_DISTRIBUTED_TRACKING;
