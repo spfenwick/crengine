@@ -713,7 +713,8 @@ bool buildOptimalBreaks(const OptimalBreakSetup & setup,
     while ( current >= 0 ) {
         size_t state = current*4 + fitness;
         result.push_back(OptimalLineBreak(candidates[current].pos,
-                                          candidates[current].hyphenated));
+                                          candidates[current].hyphenated,
+                                          allow_emergency_stretch));
         int next_current = previous_candidate[state];
         int next_fitness = previous_fitness[state];
         current = next_current;
@@ -1129,6 +1130,7 @@ bool prepareOptimalBreaks(const KnuthParagraph & p,
 struct LineJustifier {
     const formatted_text_fragment_t * pbuffer;
     bool harfbuzz;
+    bool emergency_stretch; // see OptimalLineBreak
 
     // Glyph gaps of this word that distributed tracking may adjust. Only the
     // HarfBuzz draw path implements LFNT_HINT_DISTRIBUTED_TRACKING, and
@@ -1273,6 +1275,12 @@ struct LineJustifier {
             max_common_space = std::min(max_common_space,
                     natural + stretch);
         }
+        if ( spaces > 0 && min_common_space > max_common_space ) {
+            // No width suits every space: as the planner does, use the
+            // rounded mean natural width and let tracking do the rest.
+            min_common_space = std::max(1, (natural_space_total + spaces / 2) / spaces);
+            max_common_space = min_common_space;
+        }
         if ( spaces == 0 ) {
             // A positive limit of zero is a direction invariant, not merely
             // a planner preference. With no word gaps available, leave the
@@ -1291,9 +1299,9 @@ struct LineJustifier {
         int tracking_points = countDistributedTrackingPoints(frmline);
         int tracking_shrink_capacity = tracking_points > 0
                 ? getDistributedTrackingLimit(natural_width, true) : 0;
-        bool emergency_stretch = min_common_space <= max_common_space &&
-                (long long)desired_space_total >
-                (long long)max_common_space * spaces;
+        // Same choice as the planner made for this line: without emergency
+        // stretch, spaces stop at their maximum and tracking stretch (if
+        // allowed) does the rest.
         int target_space = knuthCommonSpaceTarget(
                 desired_space_total, spaces, min_common_space,
                 max_common_space, emergency_stretch,
@@ -1409,8 +1417,9 @@ bool knuthBreakParagraph( const KnuthParagraph & p, std::vector<OptimalLineBreak
 }
 
 void knuthJustifyLine( formatted_line_t * frmline, int extra_width,
-                       const formatted_text_fragment_t * pbuffer, bool harfbuzz )
+                       const formatted_text_fragment_t * pbuffer, bool harfbuzz,
+                       bool emergency_stretch )
 {
-    LineJustifier justifier = { pbuffer, harfbuzz };
+    LineJustifier justifier = { pbuffer, harfbuzz, emergency_stretch };
     justifier.applyOptimizedJustification(frmline, extra_width);
 }
