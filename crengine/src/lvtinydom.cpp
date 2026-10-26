@@ -2434,22 +2434,6 @@ tinyNodeCollection::tinyNodeCollection()
 , _minSpaceCondensingPercent(DEF_MIN_SPACE_CONDENSING_PERCENT)
 , _unusedSpaceThresholdPercent(DEF_UNUSED_SPACE_THRESHOLD_PERCENT)
 , _maxAddedLetterSpacingPercent(DEF_MAX_ADDED_LETTER_SPACING_PERCENT)
-, _lineBreakingMode(DEF_LINE_BREAKING_MODE)
-, _justifySpaceShrinkPercent(DEF_JUSTIFY_SPACE_SHRINK_PERCENT)
-, _justifySpaceStretchPercent(DEF_JUSTIFY_SPACE_STRETCH_PERCENT)
-, _justifyTrackingShrinkPercent(DEF_JUSTIFY_TRACKING_SHRINK_PERCENT)
-, _justifyTrackingStretchPercent(DEF_JUSTIFY_TRACKING_STRETCH_PERCENT)
-, _justifyPretolerance(DEF_JUSTIFY_PRETOLERANCE)
-, _justifyTolerance(DEF_JUSTIFY_TOLERANCE)
-, _justifyHyphenPenalty(DEF_JUSTIFY_HYPHEN_PENALTY)
-, _justifyExplicitHyphenPenalty(DEF_JUSTIFY_EX_HYPHEN_PENALTY)
-, _justifyLinePenalty(DEF_JUSTIFY_LINE_PENALTY)
-, _justifyAdjacentDemerits(DEF_JUSTIFY_ADJ_DEMERITS)
-, _justifyDoubleHyphenDemerits(DEF_JUSTIFY_DOUBLE_HYPHEN_DEMERITS)
-, _justifyFinalHyphenDemerits(DEF_JUSTIFY_FINAL_HYPHEN_DEMERITS)
-, _justifyEmergencyStretchPercent(DEF_JUSTIFY_EMERGENCY_STRETCH_PERCENT)
-, _justifyLastLineMinPercent(DEF_JUSTIFY_LAST_LINE_MIN_PERCENT)
-, _justifyTrackingDeltaMaxBp(DEF_JUSTIFY_TRACKING_DELTA_MAX_BP)
 , _cjkWidthScalePercent(DEF_CJK_WIDTH_SCALE_PERCENT)
 , _nodeStyleHash(0)
 , _nodeDisplayStyleHash(NODE_DISPLAY_STYLE_HASH_UNINITIALIZED)
@@ -2496,22 +2480,6 @@ tinyNodeCollection::tinyNodeCollection( tinyNodeCollection & v )
 , _minSpaceCondensingPercent(DEF_MIN_SPACE_CONDENSING_PERCENT)
 , _unusedSpaceThresholdPercent(DEF_UNUSED_SPACE_THRESHOLD_PERCENT)
 , _maxAddedLetterSpacingPercent(DEF_MAX_ADDED_LETTER_SPACING_PERCENT)
-, _lineBreakingMode(DEF_LINE_BREAKING_MODE)
-, _justifySpaceShrinkPercent(DEF_JUSTIFY_SPACE_SHRINK_PERCENT)
-, _justifySpaceStretchPercent(DEF_JUSTIFY_SPACE_STRETCH_PERCENT)
-, _justifyTrackingShrinkPercent(DEF_JUSTIFY_TRACKING_SHRINK_PERCENT)
-, _justifyTrackingStretchPercent(DEF_JUSTIFY_TRACKING_STRETCH_PERCENT)
-, _justifyPretolerance(DEF_JUSTIFY_PRETOLERANCE)
-, _justifyTolerance(DEF_JUSTIFY_TOLERANCE)
-, _justifyHyphenPenalty(DEF_JUSTIFY_HYPHEN_PENALTY)
-, _justifyExplicitHyphenPenalty(DEF_JUSTIFY_EX_HYPHEN_PENALTY)
-, _justifyLinePenalty(DEF_JUSTIFY_LINE_PENALTY)
-, _justifyAdjacentDemerits(DEF_JUSTIFY_ADJ_DEMERITS)
-, _justifyDoubleHyphenDemerits(DEF_JUSTIFY_DOUBLE_HYPHEN_DEMERITS)
-, _justifyFinalHyphenDemerits(DEF_JUSTIFY_FINAL_HYPHEN_DEMERITS)
-, _justifyEmergencyStretchPercent(DEF_JUSTIFY_EMERGENCY_STRETCH_PERCENT)
-, _justifyLastLineMinPercent(DEF_JUSTIFY_LAST_LINE_MIN_PERCENT)
-, _justifyTrackingDeltaMaxBp(DEF_JUSTIFY_TRACKING_DELTA_MAX_BP)
 , _cjkWidthScalePercent(DEF_CJK_WIDTH_SCALE_PERCENT)
 , _nodeStyleHash(0)
 , _nodeDisplayStyleHash(NODE_DISPLAY_STYLE_HASH_UNINITIALIZED)
@@ -3972,16 +3940,7 @@ LFormattedText * lxmlDocBase::createFormattedText()
     p->setMinSpaceCondensingPercent(_minSpaceCondensingPercent);
     p->setUnusedSpaceThresholdPercent(_unusedSpaceThresholdPercent);
     p->setMaxAddedLetterSpacingPercent(_maxAddedLetterSpacingPercent);
-    p->setLineBreakingMode(_lineBreakingMode);
-    p->setJustificationConfig(
-            _justifySpaceShrinkPercent, _justifySpaceStretchPercent,
-            _justifyTrackingShrinkPercent, _justifyTrackingStretchPercent,
-            _justifyPretolerance, _justifyTolerance,
-            _justifyHyphenPenalty, _justifyExplicitHyphenPenalty,
-            _justifyLinePenalty, _justifyAdjacentDemerits,
-            _justifyDoubleHyphenDemerits, _justifyFinalHyphenDemerits,
-            _justifyEmergencyStretchPercent, _justifyLastLineMinPercent,
-            _justifyTrackingDeltaMaxBp);
+    p->setKnuthJustifyConfig(_knuthJustifyConfig);
     p->setCJKWidthScalePercent(_cjkWidthScalePercent);
     p->setHighlightOptions(&_highlightOptions);
     return p;
@@ -5634,7 +5593,7 @@ bool ldomDocument::render( LVRendPageList * pages, LVDocViewCallback * callback,
     setRenderProps( width, dy, showCover, y0, def_font, def_interline_space, props );
     // Hyphenation settings or dictionaries may have changed since the last
     // (full or partial) rendering.
-    LFormattedText::clearHyphenationCache();
+    knuthClearHyphenationCache();
 
     // update styles
 //    if ( getRootNode()->getStyle().isNull() || getRootNode()->getFont().isNull()
@@ -18908,28 +18867,7 @@ lUInt32 tinyNodeCollection::calcStyleHash(bool already_rendered, lUInt32 force_n
     res = res * 31 + _spaceWidthScalePercent;
     res = res * 31 + _minSpaceCondensingPercent;
     res = res * 31 + _unusedSpaceThresholdPercent;
-    // Knuth-Plass line breaking changes line breaks, paragraph heights and
-    // pagination, so it must invalidate any rendering made with another
-    // mode or configuration. Greedy mode ignores these settings: leave the
-    // hash as it was without them, so existing caches stay valid.
-    if ( _lineBreakingMode != 0 ) {
-        res = res * 31 + _lineBreakingMode;
-        res = res * 31 + _justifySpaceShrinkPercent;
-        res = res * 31 + _justifySpaceStretchPercent;
-        res = res * 31 + _justifyTrackingShrinkPercent;
-        res = res * 31 + _justifyTrackingStretchPercent;
-        res = res * 31 + _justifyPretolerance;
-        res = res * 31 + _justifyTolerance;
-        res = res * 31 + _justifyHyphenPenalty;
-        res = res * 31 + _justifyExplicitHyphenPenalty;
-        res = res * 31 + _justifyLinePenalty;
-        res = res * 31 + _justifyAdjacentDemerits;
-        res = res * 31 + _justifyDoubleHyphenDemerits;
-        res = res * 31 + _justifyFinalHyphenDemerits;
-        res = res * 31 + _justifyEmergencyStretchPercent;
-        res = res * 31 + _justifyLastLineMinPercent;
-        res = res * 31 + _justifyTrackingDeltaMaxBp;
-    }
+    res = _knuthJustifyConfig.addToHash(res);
     res = res * 31 + _cjkWidthScalePercent;
 
     // _maxAddedLetterSpacingPercent does not need to be accounted, as, working
