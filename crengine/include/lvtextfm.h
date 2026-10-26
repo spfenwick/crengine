@@ -21,6 +21,7 @@
 #include "lvfntman.h"
 #include "lvbmpbuf.h"
 #include "textlang.h"
+#include "knuthjustify.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -322,22 +323,7 @@ typedef struct
    lInt32                unused_space_threshold_percent; /**< % (of line width) of unused space on a line to trigger hyphenation,
                                                               or addition of letter spacing for justification  */
    lInt32                max_added_letter_spacing_percent; /**< Max allowed added letter spacing (% of font size) */
-   lInt32                line_breaking_mode; /**< 0: greedy, 1: Knuth-Plass optimization of suitable justified paragraphs */
-   lInt32                justify_space_shrink_percent;
-   lInt32                justify_space_stretch_percent;
-   lInt32                justify_tracking_shrink_percent;
-   lInt32                justify_tracking_stretch_percent;
-   lInt32                justify_pretolerance;
-   lInt32                justify_tolerance;
-   lInt32                justify_hyphen_penalty;
-   lInt32                justify_explicit_hyphen_penalty;
-   lInt32                justify_line_penalty;
-   lInt32                justify_adjacent_demerits;
-   lInt32                justify_double_hyphen_demerits;
-   lInt32                justify_final_hyphen_demerits;
-   lInt32                justify_emergency_stretch_percent;
-   lInt32                justify_last_line_min_percent;
-   lInt32                justify_tracking_delta_max_bp;
+   KnuthJustifyConfig    knuth; /**< line breaking strategy and Knuth-Plass settings */
    // CJK char width
    lInt32                cjk_width_scale_percent; /**< scale the normal width of all CJK chars in all fonts by this percent */
 
@@ -428,9 +414,6 @@ private:
 public:
     formatted_text_fragment_t * GetBuffer() { return m_pbuffer; }
 
-    /// drop cached hyphenation points (hyphenation settings may have changed)
-    static void clearHyphenationCache();
-
     /// set strut height and baseline (line boxes starting minimal values)
     void setStrut(lUInt16 height, lUInt16 baseline) {
         m_pbuffer->strut_height = height;
@@ -459,19 +442,8 @@ public:
     /// set max allowed added letter spacing (0..20% of font size)
     void setMaxAddedLetterSpacingPercent(int maxAddedLetterSpacingPercent);
 
-    /// set line breaking mode (0: greedy, 1: Knuth-Plass paragraph optimization)
-    void setLineBreakingMode(int lineBreakingMode);
-
-    /// set Knuth-Plass justification limits and penalties
-    void setJustificationConfig(
-            int spaceShrinkPercent, int spaceStretchPercent,
-            int trackingShrinkPercent, int trackingStretchPercent,
-            int pretolerance, int tolerance,
-            int hyphenPenalty, int explicitHyphenPenalty,
-            int linePenalty, int adjacentDemerits,
-            int doubleHyphenDemerits, int finalHyphenDemerits,
-            int emergencyStretchPercent, int lastLineMinPercent,
-            int trackingDeltaMaxBp);
+    /// set line breaking strategy and Knuth-Plass settings
+    void setKnuthJustifyConfig(const KnuthJustifyConfig & config);
 
     /// set CJK glyph width scaling percent option (100..150%)
     // (scale the nominal width of all CJK chars in all fonts by this percent)

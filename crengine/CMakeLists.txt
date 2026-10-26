@@ -30,6 +30,7 @@ if ( NOT ${GUI} STREQUAL FB2PROPS )
     src/lvdocview.cpp  
     src/lvpagesplitter.cpp  
     src/lvtextfm.cpp
+    src/knuthjustify.cpp
     src/lvrend.cpp
     src/wolutil.cpp
     src/hist.cpp      
