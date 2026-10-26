@@ -4554,50 +4554,32 @@ public:
             int fb_t_start = 0;
             int fb_t_end = len;
             int hg = 0;  // index in glyph_info/glyph_pos
-            int tracking_width = distributed_tracking ? target_w : 0;
-            lUInt32 tracking_packed = distributed_tracking
-                    ? (lUInt32)target_h : 0;
-            int tracking_points = tracking_packed & 0xFFFF;
-            int tracking_start = tracking_packed >> 16;
-            int tracking_points_done = tracking_start;
-            int tracking_width_done = tracking_points > 0
-                    ? tracking_width * tracking_start / tracking_points : 0;
-            int tracking_width_done_x64 = knuthDistributedTrackingX64(
-                    tracking_width, tracking_start, tracking_points);
+            KnuthTrackingPen tracking(distributed_tracking ? target_w : 0,
+                                      distributed_tracking ? target_h : 0);
             int fractional_positioning_granularity = getFractionalGlyphPositioningGranularity();
             bool use_fractional_positioning = fractional_positioning_granularity > 1;
             lInt32 x_64 = x * 64;
-            if ( use_fractional_positioning && tracking_points > 0 ) {
+            if ( use_fractional_positioning && tracking.active() ) {
                 // word->x already contains the integer part assigned during
                 // layout. Restore the line accumulator's fractional part so
                 // kerning and tracking advance one continuous 26.6 pen even
                 // though words are drawn in separate calls.
-                x_64 += tracking_width_done_x64 - tracking_width_done * 64;
+                x_64 += tracking.startOffsetX64();
                 x = FONT_METRIC_TO_PX(x_64);
             }
-            // Move the pen by the tracking of the next n glyph gaps, along
-            // the same line-wide accumulator layout used.
+            // Move the pen by the tracking of the next n glyph gaps
             auto advanceTracking = [&](int n) {
-                if ( n <= 0 || tracking_points_done >= tracking_points )
+                int delta_px, delta_x64;
+                if ( !tracking.advance(n, delta_px, delta_x64) )
                     return;
-                tracking_points_done += n;
-                if ( tracking_points_done > tracking_points )
-                    tracking_points_done = tracking_points;
-                int target_done = tracking_width *
-                        tracking_points_done / tracking_points;
                 if ( use_fractional_positioning ) {
-                    int target_done_x64 = knuthDistributedTrackingX64(
-                            tracking_width, tracking_points_done,
-                            tracking_points);
-                    x_64 += target_done_x64 - tracking_width_done_x64;
+                    x_64 += delta_x64;
                     x = FONT_METRIC_TO_PX(x_64);
-                    tracking_width_done_x64 = target_done_x64;
                 }
                 else {
-                    x += target_done - tracking_width_done;
+                    x += delta_px;
                     x_64 = x * 64;
                 }
-                tracking_width_done = target_done;
             };
             while (hg < glyph_count) { // hg is the start of a new cluster at this point
                 bool draw_with_fallback = false;
@@ -4720,7 +4702,7 @@ public:
                        width, text_decoration_back_gap, target_w, target_h, svg_collector );
                     x += fb_advance;
                     x_64 = x * 64;
-                    if ( tracking_points > 0 ) {
+                    if ( tracking.active() ) {
                         // Apply the tracking this font would have added after
                         // each of the skipped clusters, so the following
                         // glyphs land where layout put them.

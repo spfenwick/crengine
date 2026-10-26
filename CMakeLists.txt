@@ -34,6 +34,7 @@ set(CRE_SRCS
     crengine/src/fb3fmt.cpp
     crengine/src/hist.cpp
     crengine/src/hyphman.cpp
+    crengine/src/knuthjustify.cpp
     crengine/src/lstridmap.cpp
     crengine/src/lvdocview.cpp
     crengine/src/lvdrawbuf.cpp

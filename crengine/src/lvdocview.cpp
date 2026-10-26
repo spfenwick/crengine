@@ -4966,23 +4966,7 @@ void LVDocView::createEmptyDocument() {
     m_doc->setMinSpaceCondensingPercent(m_props->getIntDef(PROP_FORMAT_MIN_SPACE_CONDENSING_PERCENT, DEF_MIN_SPACE_CONDENSING_PERCENT));
     m_doc->setUnusedSpaceThresholdPercent(m_props->getIntDef(PROP_FORMAT_UNUSED_SPACE_THRESHOLD_PERCENT, DEF_UNUSED_SPACE_THRESHOLD_PERCENT));
     m_doc->setMaxAddedLetterSpacingPercent(m_props->getIntDef(PROP_FORMAT_MAX_ADDED_LETTER_SPACING_PERCENT, DEF_MAX_ADDED_LETTER_SPACING_PERCENT));
-    m_doc->setLineBreakingMode(m_props->getIntDef(PROP_FORMAT_LINE_BREAKING_MODE, DEF_LINE_BREAKING_MODE));
-    m_doc->setJustificationConfig(
-            m_props->getIntDef(PROP_FORMAT_JUSTIFY_SPACE_SHRINK_PERCENT, DEF_JUSTIFY_SPACE_SHRINK_PERCENT),
-            m_props->getIntDef(PROP_FORMAT_JUSTIFY_SPACE_STRETCH_PERCENT, DEF_JUSTIFY_SPACE_STRETCH_PERCENT),
-            m_props->getIntDef(PROP_FORMAT_JUSTIFY_TRACKING_SHRINK_PERCENT, DEF_JUSTIFY_TRACKING_SHRINK_PERCENT),
-            m_props->getIntDef(PROP_FORMAT_JUSTIFY_TRACKING_STRETCH_PERCENT, DEF_JUSTIFY_TRACKING_STRETCH_PERCENT),
-            m_props->getIntDef(PROP_FORMAT_JUSTIFY_PRETOLERANCE, DEF_JUSTIFY_PRETOLERANCE),
-            m_props->getIntDef(PROP_FORMAT_JUSTIFY_TOLERANCE, DEF_JUSTIFY_TOLERANCE),
-            m_props->getIntDef(PROP_FORMAT_JUSTIFY_HYPHEN_PENALTY, DEF_JUSTIFY_HYPHEN_PENALTY),
-            m_props->getIntDef(PROP_FORMAT_JUSTIFY_EX_HYPHEN_PENALTY, DEF_JUSTIFY_EX_HYPHEN_PENALTY),
-            m_props->getIntDef(PROP_FORMAT_JUSTIFY_LINE_PENALTY, DEF_JUSTIFY_LINE_PENALTY),
-            m_props->getIntDef(PROP_FORMAT_JUSTIFY_ADJ_DEMERITS, DEF_JUSTIFY_ADJ_DEMERITS),
-            m_props->getIntDef(PROP_FORMAT_JUSTIFY_DOUBLE_HYPHEN_DEMERITS, DEF_JUSTIFY_DOUBLE_HYPHEN_DEMERITS),
-            m_props->getIntDef(PROP_FORMAT_JUSTIFY_FINAL_HYPHEN_DEMERITS, DEF_JUSTIFY_FINAL_HYPHEN_DEMERITS),
-            m_props->getIntDef(PROP_FORMAT_JUSTIFY_EMERGENCY_STRETCH_PERCENT, DEF_JUSTIFY_EMERGENCY_STRETCH_PERCENT),
-            m_props->getIntDef(PROP_FORMAT_JUSTIFY_LAST_LINE_MIN_PERCENT, DEF_JUSTIFY_LAST_LINE_MIN_PERCENT),
-            m_props->getIntDef(PROP_FORMAT_JUSTIFY_TRACKING_DELTA_MAX_BP, DEF_JUSTIFY_TRACKING_DELTA_MAX_BP));
+    m_doc->setKnuthJustifyConfig(KnuthJustifyConfig::fromProps(m_props.get()));
     m_doc->setCJKWidthScalePercent(m_props->getIntDef(PROP_FORMAT_CJK_WIDTH_SCALE_PERCENT, DEF_CJK_WIDTH_SCALE_PERCENT));
     m_doc->setHangingPunctiationEnabled(m_props->getBoolDef(PROP_FLOATING_PUNCTUATION, false));
     m_doc->setRenderBlockRenderingFlags(m_props->getIntDef(PROP_RENDER_BLOCK_RENDERING_FLAGS, DEF_RENDER_BLOCK_RENDERING_FLAGS));
@@ -6823,44 +6807,7 @@ void LVDocView::propsUpdateDefaults(CRPropRef props) {
         p = 20;
     props->setInt(PROP_FORMAT_MAX_ADDED_LETTER_SPACING_PERCENT, p);
 
-    p = props->getIntDef(PROP_FORMAT_LINE_BREAKING_MODE, DEF_LINE_BREAKING_MODE);
-    if (p<0)
-        p = 0;
-    if (p>1)
-        p = 1;
-    props->setInt(PROP_FORMAT_LINE_BREAKING_MODE, p);
-
-    struct JustifyIntLimit {
-        const char * name;
-        int def;
-        int min;
-        int max;
-    };
-    static const JustifyIntLimit justify_limits[] = {
-        { PROP_FORMAT_JUSTIFY_SPACE_SHRINK_PERCENT, DEF_JUSTIFY_SPACE_SHRINK_PERCENT, 0, 100 },
-        { PROP_FORMAT_JUSTIFY_SPACE_STRETCH_PERCENT, DEF_JUSTIFY_SPACE_STRETCH_PERCENT, 0, 200 },
-        { PROP_FORMAT_JUSTIFY_TRACKING_SHRINK_PERCENT, DEF_JUSTIFY_TRACKING_SHRINK_PERCENT, 0, 20 },
-        { PROP_FORMAT_JUSTIFY_TRACKING_STRETCH_PERCENT, DEF_JUSTIFY_TRACKING_STRETCH_PERCENT, 0, 20 },
-        { PROP_FORMAT_JUSTIFY_PRETOLERANCE, DEF_JUSTIFY_PRETOLERANCE, 0, 10000 },
-        { PROP_FORMAT_JUSTIFY_TOLERANCE, DEF_JUSTIFY_TOLERANCE, 0, 10000 },
-        { PROP_FORMAT_JUSTIFY_HYPHEN_PENALTY, DEF_JUSTIFY_HYPHEN_PENALTY, 0, 100000 },
-        { PROP_FORMAT_JUSTIFY_EX_HYPHEN_PENALTY, DEF_JUSTIFY_EX_HYPHEN_PENALTY, 0, 100000 },
-        { PROP_FORMAT_JUSTIFY_LINE_PENALTY, DEF_JUSTIFY_LINE_PENALTY, 0, 10000 },
-        { PROP_FORMAT_JUSTIFY_ADJ_DEMERITS, DEF_JUSTIFY_ADJ_DEMERITS, 0, 100000 },
-        { PROP_FORMAT_JUSTIFY_DOUBLE_HYPHEN_DEMERITS, DEF_JUSTIFY_DOUBLE_HYPHEN_DEMERITS, 0, 10000000 },
-        { PROP_FORMAT_JUSTIFY_FINAL_HYPHEN_DEMERITS, DEF_JUSTIFY_FINAL_HYPHEN_DEMERITS, 0, 10000000 },
-        { PROP_FORMAT_JUSTIFY_EMERGENCY_STRETCH_PERCENT, DEF_JUSTIFY_EMERGENCY_STRETCH_PERCENT, 0, 100 },
-        { PROP_FORMAT_JUSTIFY_LAST_LINE_MIN_PERCENT, DEF_JUSTIFY_LAST_LINE_MIN_PERCENT, 0, 100 },
-        { PROP_FORMAT_JUSTIFY_TRACKING_DELTA_MAX_BP, DEF_JUSTIFY_TRACKING_DELTA_MAX_BP, 0, 2000 },
-    };
-    for (size_t i = 0; i < sizeof(justify_limits) / sizeof(justify_limits[0]); i++) {
-        p = props->getIntDef(justify_limits[i].name, justify_limits[i].def);
-        if (p < justify_limits[i].min)
-            p = justify_limits[i].min;
-        if (p > justify_limits[i].max)
-            p = justify_limits[i].max;
-        props->setInt(justify_limits[i].name, p);
-    }
+    knuthJustifyPropsUpdateDefaults(props.get());
 
     p = props->getIntDef(PROP_FORMAT_CJK_WIDTH_SCALE_PERCENT, DEF_CJK_WIDTH_SCALE_PERCENT);
     if (p<100)
@@ -7258,47 +7205,13 @@ CRPropRef LVDocView::propsApply(CRPropRef props) {
             if (m_doc) // not when noDefaultDocument=true
                 if (getDocument()->setMaxAddedLetterSpacingPercent(value))
                     REQUEST_RENDER("propsApply max added letter spacing percent")
-        } else if (name == PROP_FORMAT_LINE_BREAKING_MODE) {
-            int value = props->getIntDef(PROP_FORMAT_LINE_BREAKING_MODE, DEF_LINE_BREAKING_MODE);
-            if (m_doc) // not when noDefaultDocument=true
-                if (getDocument()->setLineBreakingMode(value))
-                    REQUEST_RENDER("propsApply line breaking mode")
-        } else if (name == PROP_FORMAT_JUSTIFY_SPACE_SHRINK_PERCENT ||
-                name == PROP_FORMAT_JUSTIFY_SPACE_STRETCH_PERCENT ||
-                name == PROP_FORMAT_JUSTIFY_TRACKING_SHRINK_PERCENT ||
-                name == PROP_FORMAT_JUSTIFY_TRACKING_STRETCH_PERCENT ||
-                name == PROP_FORMAT_JUSTIFY_PRETOLERANCE ||
-                name == PROP_FORMAT_JUSTIFY_TOLERANCE ||
-                name == PROP_FORMAT_JUSTIFY_HYPHEN_PENALTY ||
-                name == PROP_FORMAT_JUSTIFY_EX_HYPHEN_PENALTY ||
-                name == PROP_FORMAT_JUSTIFY_LINE_PENALTY ||
-                name == PROP_FORMAT_JUSTIFY_ADJ_DEMERITS ||
-                name == PROP_FORMAT_JUSTIFY_DOUBLE_HYPHEN_DEMERITS ||
-                name == PROP_FORMAT_JUSTIFY_FINAL_HYPHEN_DEMERITS ||
-                name == PROP_FORMAT_JUSTIFY_EMERGENCY_STRETCH_PERCENT ||
-                name == PROP_FORMAT_JUSTIFY_LAST_LINE_MIN_PERCENT ||
-                name == PROP_FORMAT_JUSTIFY_TRACKING_DELTA_MAX_BP) {
+        } else if (isKnuthJustifyProp(name.c_str())) {
             // The properties arrive one at a time; update the stored set before
             // reading the complete configuration so unchanged values are kept.
             m_props->setString(name.c_str(), value);
-            if (m_doc)
-                if (getDocument()->setJustificationConfig(
-                        m_props->getIntDef(PROP_FORMAT_JUSTIFY_SPACE_SHRINK_PERCENT, DEF_JUSTIFY_SPACE_SHRINK_PERCENT),
-                        m_props->getIntDef(PROP_FORMAT_JUSTIFY_SPACE_STRETCH_PERCENT, DEF_JUSTIFY_SPACE_STRETCH_PERCENT),
-                        m_props->getIntDef(PROP_FORMAT_JUSTIFY_TRACKING_SHRINK_PERCENT, DEF_JUSTIFY_TRACKING_SHRINK_PERCENT),
-                        m_props->getIntDef(PROP_FORMAT_JUSTIFY_TRACKING_STRETCH_PERCENT, DEF_JUSTIFY_TRACKING_STRETCH_PERCENT),
-                        m_props->getIntDef(PROP_FORMAT_JUSTIFY_PRETOLERANCE, DEF_JUSTIFY_PRETOLERANCE),
-                        m_props->getIntDef(PROP_FORMAT_JUSTIFY_TOLERANCE, DEF_JUSTIFY_TOLERANCE),
-                        m_props->getIntDef(PROP_FORMAT_JUSTIFY_HYPHEN_PENALTY, DEF_JUSTIFY_HYPHEN_PENALTY),
-                        m_props->getIntDef(PROP_FORMAT_JUSTIFY_EX_HYPHEN_PENALTY, DEF_JUSTIFY_EX_HYPHEN_PENALTY),
-                        m_props->getIntDef(PROP_FORMAT_JUSTIFY_LINE_PENALTY, DEF_JUSTIFY_LINE_PENALTY),
-                        m_props->getIntDef(PROP_FORMAT_JUSTIFY_ADJ_DEMERITS, DEF_JUSTIFY_ADJ_DEMERITS),
-                        m_props->getIntDef(PROP_FORMAT_JUSTIFY_DOUBLE_HYPHEN_DEMERITS, DEF_JUSTIFY_DOUBLE_HYPHEN_DEMERITS),
-                        m_props->getIntDef(PROP_FORMAT_JUSTIFY_FINAL_HYPHEN_DEMERITS, DEF_JUSTIFY_FINAL_HYPHEN_DEMERITS),
-                        m_props->getIntDef(PROP_FORMAT_JUSTIFY_EMERGENCY_STRETCH_PERCENT, DEF_JUSTIFY_EMERGENCY_STRETCH_PERCENT),
-                        m_props->getIntDef(PROP_FORMAT_JUSTIFY_LAST_LINE_MIN_PERCENT, DEF_JUSTIFY_LAST_LINE_MIN_PERCENT),
-                        m_props->getIntDef(PROP_FORMAT_JUSTIFY_TRACKING_DELTA_MAX_BP, DEF_JUSTIFY_TRACKING_DELTA_MAX_BP)))
-                    REQUEST_RENDER("propsApply Knuth-Plass justification config")
+            if (m_doc) // not when noDefaultDocument=true
+                if (getDocument()->setKnuthJustifyConfig(KnuthJustifyConfig::fromProps(m_props.get())))
+                    REQUEST_RENDER("propsApply line breaking")
         } else if (name == PROP_FORMAT_CJK_WIDTH_SCALE_PERCENT) {
             int value = props->getIntDef(PROP_FORMAT_CJK_WIDTH_SCALE_PERCENT, DEF_CJK_WIDTH_SCALE_PERCENT);
             if (m_doc) // not when noDefaultDocument=true

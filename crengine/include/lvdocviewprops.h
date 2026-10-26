@@ -85,24 +85,6 @@
 #define PROP_FORMAT_UNUSED_SPACE_THRESHOLD_PERCENT   "crengine.style.unused.space.threshold.percent"
 // Max allowed added letter spacing (% of font size)
 #define PROP_FORMAT_MAX_ADDED_LETTER_SPACING_PERCENT "crengine.style.max.added.letter.spacing.percent"
-// Line breaking strategy: 0=greedy, 1=Knuth-Plass paragraph optimization
-#define PROP_FORMAT_LINE_BREAKING_MODE               "crengine.style.line.breaking.mode"
-// Knuth-Plass justification controls (used when line breaking mode is 1)
-#define PROP_FORMAT_JUSTIFY_SPACE_SHRINK_PERCENT     "crengine.style.justify.space.shrink.percent"
-#define PROP_FORMAT_JUSTIFY_SPACE_STRETCH_PERCENT    "crengine.style.justify.space.stretch.percent"
-#define PROP_FORMAT_JUSTIFY_TRACKING_SHRINK_PERCENT  "crengine.style.justify.tracking.shrink.percent"
-#define PROP_FORMAT_JUSTIFY_TRACKING_STRETCH_PERCENT "crengine.style.justify.tracking.stretch.percent"
-#define PROP_FORMAT_JUSTIFY_PRETOLERANCE              "crengine.style.justify.pretolerance"
-#define PROP_FORMAT_JUSTIFY_TOLERANCE                 "crengine.style.justify.tolerance"
-#define PROP_FORMAT_JUSTIFY_HYPHEN_PENALTY            "crengine.style.justify.hyphen.penalty"
-#define PROP_FORMAT_JUSTIFY_EX_HYPHEN_PENALTY         "crengine.style.justify.explicit.hyphen.penalty"
-#define PROP_FORMAT_JUSTIFY_LINE_PENALTY              "crengine.style.justify.line.penalty"
-#define PROP_FORMAT_JUSTIFY_ADJ_DEMERITS              "crengine.style.justify.adjacent.demerits"
-#define PROP_FORMAT_JUSTIFY_DOUBLE_HYPHEN_DEMERITS    "crengine.style.justify.double.hyphen.demerits"
-#define PROP_FORMAT_JUSTIFY_FINAL_HYPHEN_DEMERITS     "crengine.style.justify.final.hyphen.demerits"
-#define PROP_FORMAT_JUSTIFY_EMERGENCY_STRETCH_PERCENT "crengine.style.justify.emergency.stretch.percent"
-#define PROP_FORMAT_JUSTIFY_LAST_LINE_MIN_PERCENT     "crengine.style.justify.last.line.min.percent"
-#define PROP_FORMAT_JUSTIFY_TRACKING_DELTA_MAX_BP     "crengine.style.justify.tracking.delta.max.bp"
 // CJK char width expansion (% of nominal width)
 #define PROP_FORMAT_CJK_WIDTH_SCALE_PERCENT          "crengine.style.cjk.width.scale.percent"
 
