@@ -45,6 +45,16 @@ const KnuthJustifyProp knuthJustifyProps[] = {
 };
 const int knuthJustifyPropCount = sizeof(knuthJustifyProps) / sizeof(knuthJustifyProps[0]);
 
+// The prop's value in props, or its default, clamped to its range.
+int getClampedProp( CRPropAccessor * props, const KnuthJustifyProp & prop ) {
+    int p = props->getIntDef(prop.name, prop.def);
+    if ( p < prop.min )
+        p = prop.min;
+    if ( p > prop.max )
+        p = prop.max;
+    return p;
+}
+
 } // namespace
 
 KnuthJustifyConfig::KnuthJustifyConfig() {
@@ -54,9 +64,11 @@ KnuthJustifyConfig::KnuthJustifyConfig() {
 
 KnuthJustifyConfig KnuthJustifyConfig::fromProps( CRPropAccessor * props ) {
     KnuthJustifyConfig config;
+    // Clamped here too: propsApply() reads values that
+    // knuthJustifyPropsUpdateDefaults() has not seen.
     for ( int i=0; i<knuthJustifyPropCount; i++ ) {
         const KnuthJustifyProp & prop = knuthJustifyProps[i];
-        config.*prop.field = props->getIntDef(prop.name, prop.def);
+        config.*prop.field = getClampedProp(props, prop);
     }
     return config;
 }
@@ -80,12 +92,7 @@ lUInt32 KnuthJustifyConfig::addToHash( lUInt32 hash ) const {
 void knuthJustifyPropsUpdateDefaults( CRPropAccessor * props ) {
     for ( int i=0; i<knuthJustifyPropCount; i++ ) {
         const KnuthJustifyProp & prop = knuthJustifyProps[i];
-        int p = props->getIntDef(prop.name, prop.def);
-        if ( p < prop.min )
-            p = prop.min;
-        if ( p > prop.max )
-            p = prop.max;
-        props->setInt(prop.name, p);
+        props->setInt(prop.name, getClampedProp(props, prop));
     }
 }
 
