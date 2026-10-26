@@ -3102,10 +3102,11 @@ public:
 
         // Only lines whose breaks the Knuth planner chose: paragraphs it
         // rejected were broken greedily, against the legacy space limits,
-        // and must be justified by the legacy code below.
+        // and must be justified by the legacy code below. This includes
+        // lines without word spaces: the planner may have fitted them with
+        // tracking alone.
         bool optimized_adjustment = m_para_optimized &&
-                alignment == LTEXT_ALIGN_WIDTH && !m_has_cjk && !m_has_bidi &&
-                frmline->word_count > 1;
+                alignment == LTEXT_ALIGN_WIDTH && !m_has_cjk && !m_has_bidi;
         if ( optimized_adjustment ) {
             knuthJustifyLine(frmline, extra_width, m_pbuffer,
                              m_kerning_mode == KERNING_MODE_HARFBUZZ);
