@@ -459,6 +459,7 @@ public:
     bool m_para_dir_is_rtl; // boolean shortcut of m_para_bidi_type
     bool m_has_cjk; // true when some CJK met
     bool m_para_optimized; // true while lines of a Knuth-planned paragraph are being added
+    bool m_para_emergency_stretch; // the line being added was planned with emergency stretch
     int  m_cjk_prev_line_added_space_div; // Used with CJK justified lines, to
     int  m_cjk_prev_line_added_space_mod; // apply same spacing on last line.
     lUInt32 m_formatted_initial_letter_id;
@@ -524,6 +525,7 @@ public:
         m_initial_letter_exclusion.end_y = 0;
         m_has_cjk = false;
         m_para_optimized = false;
+        m_para_emergency_stretch = false;
         m_cjk_prev_line_added_space_div = 0;
         m_cjk_prev_line_added_space_mod = 0;
         m_specified_para_dir = REND_DIRECTION_UNSET;
@@ -3109,7 +3111,8 @@ public:
                 alignment == LTEXT_ALIGN_WIDTH && !m_has_cjk && !m_has_bidi;
         if ( optimized_adjustment ) {
             knuthJustifyLine(frmline, extra_width, m_pbuffer,
-                             m_kerning_mode == KERNING_MODE_HARFBUZZ);
+                             m_kerning_mode == KERNING_MODE_HARFBUZZ,
+                             m_para_emergency_stretch);
             extra_width = usable_width - frmline->width;
         }
 
@@ -5032,6 +5035,7 @@ public:
             lUInt16 saved_flags = m_flags[wrap_pos];
             if ( breaks[i].hyphenated )
                 m_flags[wrap_pos] |= LCHAR_ALLOW_HYPH_WRAP_AFTER;
+            m_para_emergency_stretch = breaks[i].emergency_stretch;
             addLine(pos, wrap_pos + 1, x, para, pos == 0,
                     wrap_pos >= m_length-1, preFormattedOnly, isLastPara, false);
             m_flags[wrap_pos] = saved_flags;
@@ -5044,7 +5048,10 @@ public:
             }
         }
         m_para_optimized = false;
-        return pos >= m_length;
+        // Always done here: the last break is the paragraph's last char.
+        // (Lines are already added, so returning false would have the
+        // greedy code add them again.)
+        return true;
     }
 
     /// Split paragraph into lines

@@ -2592,10 +2592,18 @@ public:
     virtual bool hasGlyph( lUInt32 code, bool is_fallback=false ) {
         // Mirrors the lookup in getGlyphInfo() without FT_Load_Glyph.
         // Only this face's own answer is cached: fallbacks are asked live.
-        lUInt16 cached = _hasglyph_cache.get( code );
-        if ( cached == CACHED_UNSIGNED_METRIC_NOT_SET ) {
+        // The cache only covers codes up to 0x2CFFF (above, its index wraps
+        // and would alias lower codes), so higher ones are looked up live.
+        lUInt16 cached;
+        if ( code <= 0x2CFFF ) {
+            cached = _hasglyph_cache.get( code );
+            if ( cached == CACHED_UNSIGNED_METRIC_NOT_SET ) {
+                cached = getCharIndex( code, 0 ) != 0 ? 1 : 0;
+                _hasglyph_cache.put( code, cached );
+            }
+        }
+        else {
             cached = getCharIndex( code, 0 ) != 0 ? 1 : 0;
-            _hasglyph_cache.put( code, cached );
         }
         if ( cached )
             return true;

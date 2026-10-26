@@ -36,7 +36,8 @@ struct KnuthParagraph {
 struct OptimalLineBreak {
     int pos;
     bool hyphenated;
-    OptimalLineBreak(int p, bool h) : pos(p), hyphenated(h) {}
+    bool emergency_stretch; // planned in a pass that lets word spaces go past their maximum
+    OptimalLineBreak(int p, bool h, bool e) : pos(p), hyphenated(h), emergency_stretch(e) {}
 };
 
 /// false if some char of the paragraph rules out planning (objects
@@ -54,7 +55,9 @@ bool knuthDuplicatesHyphenAfter( const KnuthParagraph & para, int pos );
 
 /// Justify a line of a planned paragraph, adding extra_width (negative to
 /// condense) with one common word space width and line-wide tracking.
+/// emergency_stretch: the line's OptimalLineBreak::emergency_stretch.
 void knuthJustifyLine( formatted_line_t * frmline, int extra_width,
-                       const formatted_text_fragment_t * pbuffer, bool harfbuzz );
+                       const formatted_text_fragment_t * pbuffer, bool harfbuzz,
+                       bool emergency_stretch );
 
 #endif
