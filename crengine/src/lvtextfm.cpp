@@ -3106,9 +3106,10 @@ public:
         // rejected were broken greedily, against the legacy space limits,
         // and must be justified by the legacy code below. This includes
         // lines without word spaces: the planner may have fitted them with
-        // tracking alone.
+        // tracking alone. (A planned paragraph has no CJK chars, even when
+        // an earlier paragraph of this block set m_has_cjk.)
         bool optimized_adjustment = m_para_optimized &&
-                alignment == LTEXT_ALIGN_WIDTH && !m_has_cjk && !m_has_bidi;
+                alignment == LTEXT_ALIGN_WIDTH && !m_has_bidi;
         if ( optimized_adjustment ) {
             knuthJustifyLine(frmline, extra_width, m_pbuffer,
                              m_kerning_mode == KERNING_MODE_HARFBUZZ,
@@ -4986,16 +4987,26 @@ public:
 
     bool tryOptimizedParagraph(src_text_fragment_t * para,
                                bool preFormattedOnly, bool isLastPara) {
-        if ( m_pbuffer->knuth.line_breaking_mode != 1 || preFormattedOnly ||
-                m_length < 1 || m_length > 4096 )
+        if ( m_pbuffer->knuth.line_breaking_mode != 1 || preFormattedOnly || m_length < 1 )
             return false;
         if ( (para->flags & LTEXT_FLAG_NEWLINE) != LTEXT_ALIGN_WIDTH ||
                 (para->flags & LTEXT_LEGACY_RENDERING) )
             return false;
-        if ( m_has_bidi || m_para_dir_is_rtl || m_has_cjk || m_has_images ||
-                m_has_inline_boxes || m_has_float_to_position || m_has_ongoing_float ||
+        // (m_has_cjk, m_has_images and m_has_inline_boxes stay set for the
+        // rest of the final block once met: knuthCanBreakParagraph() checks
+        // this paragraph's chars instead.)
+        if ( m_has_bidi || m_para_dir_is_rtl || m_has_float_to_position || m_has_ongoing_float ||
                 m_initial_letter_exclusion.active )
             return false;
+        if ( m_has_inline_boxes ) {
+            // An initial letter narrows the lines beside it once its line
+            // is added, which the planner can't foresee.
+            for ( int i=0; i<m_length; i++ ) {
+                if ( (m_flags[i] & LCHAR_IS_OBJECT) && m_charindex[i] == INLINEBOX_CHAR_INDEX &&
+                        getInitialLetterInlineBoxPseudoElem((ldomNode *)m_srcs[i]->object) )
+                    return false;
+            }
+        }
         // A changing width would invalidate paragraph-wide decisions. This also
         // excludes outer floats that are not represented in this paragraph.
         if ( getCurrentLineX() != 0 || getCurrentLineWidth() != m_pbuffer->width )
@@ -5007,6 +5018,7 @@ public:
         kpara.srcs = m_srcs;
         kpara.charindex = m_charindex;
         kpara.pad_char_index = PAD_CHAR_INDEX;
+        kpara.float_char_index = FLOAT_CHAR_INDEX;
         kpara.length = m_length;
         kpara.config = &m_pbuffer->knuth;
         kpara.harfbuzz = m_kerning_mode == KERNING_MODE_HARFBUZZ;
@@ -5036,8 +5048,15 @@ public:
             if ( breaks[i].hyphenated )
                 m_flags[wrap_pos] |= LCHAR_ALLOW_HYPH_WRAP_AFTER;
             m_para_emergency_stretch = breaks[i].emergency_stretch;
+            // As the greedy code does: addLine() then positions the line's
+            // inline boxes (and never light-formats it).
+            bool hasInlineBoxes = false;
+            if ( m_has_inline_boxes ) {
+                for ( int k=pos; k<=wrap_pos && !hasInlineBoxes; k++ )
+                    hasInlineBoxes = (m_flags[k] & LCHAR_IS_OBJECT) && m_charindex[k] == INLINEBOX_CHAR_INDEX;
+            }
             addLine(pos, wrap_pos + 1, x, para, pos == 0,
-                    wrap_pos >= m_length-1, preFormattedOnly, isLastPara, false);
+                    wrap_pos >= m_length-1, preFormattedOnly, isLastPara, hasInlineBoxes);
             m_flags[wrap_pos] = saved_flags;
             pos = wrap_pos + 1;
             if ( !breaks[i].hyphenated && knuthDuplicatesHyphenAfter(kpara, wrap_pos) ) {

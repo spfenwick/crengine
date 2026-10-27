@@ -19,6 +19,7 @@ struct KnuthParagraph {
     src_text_fragment_t * const * srcs;
     const lUInt16 * charindex;
     lUInt16 pad_char_index; // charindex marking inline padding (an object with a width)
+    lUInt16 float_char_index; // charindex marking a float (an object positioned while lines are added)
     int length;
     const KnuthJustifyConfig * config;
     bool harfbuzz;          // kerning mode: only HarfBuzz drawing can track
@@ -40,9 +41,8 @@ struct OptimalLineBreak {
     OptimalLineBreak(int p, bool h, bool e) : pos(p), hyphenated(h), emergency_stretch(e) {}
 };
 
-/// false if some char of the paragraph rules out planning (objects
-/// other than inline padding, preformatted or nowrap text, glyphs a
-/// HarfBuzz font lacks...)
+/// false if some char of the paragraph rules out planning (floats,
+/// CJK, preformatted or nowrap text, glyphs a HarfBuzz font lacks...)
 bool knuthCanBreakParagraph( const KnuthParagraph & para );
 
 /// Find the paragraph's best line breaks. false if no layout fits,
