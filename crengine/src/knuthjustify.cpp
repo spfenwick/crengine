@@ -237,6 +237,7 @@ struct OptimalBreakSetup {
     std::vector<int> end_hanging;
     std::vector<int> end_space_count;
     std::vector<int> end_space_width;
+    std::vector<int> end_box_width;     // images and inline boxes before capacity_end
     // As a line start (index: previous candidate + 1, so 0 is the
     // paragraph start): first char, width before it, first visible char,
     // its hanging, the word spaces before it, and the largest non-space
@@ -247,6 +248,7 @@ struct OptimalBreakSetup {
     std::vector<int> start_hanging;
     std::vector<int> start_space_count;
     std::vector<int> start_space_width;
+    std::vector<int> start_box_width;
     std::vector<int> start_nonspace_max;
     // Word-space limits within each candidate's segment of text,
     // (previous candidate, this candidate], with and without its last char.
@@ -477,10 +479,14 @@ bool OptimalBreakSetup::search(std::vector<OptimalLineBreak> & result,
                         maximum_common_space * space_count -
                         natural_space_total;
             }
+            // Tracking only moves glyphs: images and inline boxes on the
+            // line add nothing to what it may take.
+            int trackable_width = natural_width - (end_box_width[current] -
+                                                   start_box_width[previous+1]);
             int tracking_shrink = harfbuzz
-                    ? natural_width * config.tracking_shrink_percent / 100 : 0;
+                    ? trackable_width * config.tracking_shrink_percent / 100 : 0;
             int tracking_stretch = harfbuzz
-                    ? natural_width * config.tracking_stretch_percent / 100 : 0;
+                    ? trackable_width * config.tracking_stretch_percent / 100 : 0;
             int minimum_adjustment = minimum_space_adjustment -
                                      tracking_shrink;
             int maximum_adjustment = maximum_space_adjustment +
@@ -548,15 +554,17 @@ bool OptimalBreakSetup::search(std::vector<OptimalLineBreak> & result,
                         -tracking_adjustment > tracking_shrink )
                     continue;
                 if ( tracking_adjustment != 0 ) {
+                    // (Non-zero only within the tracking limits, so
+                    // trackable_width > 0.)
                     long long scaled = (long long)tracking_adjustment * 10000;
                     if ( scaled >= 0 )
                         tracking_basis_points =
-                                (int)((scaled + natural_width / 2) /
-                                      natural_width);
+                                (int)((scaled + trackable_width / 2) /
+                                      trackable_width);
                     else
                         tracking_basis_points =
-                                (int)((scaled - natural_width / 2) /
-                                      natural_width);
+                                (int)((scaled - trackable_width / 2) /
+                                      trackable_width);
                 }
             }
             long long line_cost = (long long)(config.line_penalty +
@@ -676,6 +684,12 @@ bool isPadChar(const KnuthParagraph & p, int i) {
     return (p.flags[i] & LCHAR_IS_OBJECT) && p.charindex[i] == p.pad_char_index;
 }
 
+// An inline image or inline-block box: a fixed-width box, like a pad, but
+// one that tracking can't adjust. (Floats never get to the planner.)
+bool isBoxChar(const KnuthParagraph & p, int i) {
+    return (p.flags[i] & LCHAR_IS_OBJECT) && p.charindex[i] != p.pad_char_index;
+}
+
 // Hyphenation points of the word at p.text[wstart, wstart+len), as a bit
 // mask (bit i: a hyphen may follow char wstart+i). len <= MAX_WORD_SIZE.
 lUInt64 getWordHyphenationPoints(const KnuthParagraph & p, src_text_fragment_t * src,
@@ -742,11 +756,12 @@ void findParagraphHyphenation(const KnuthParagraph & p, std::vector<bool> & hyph
 // visible char, so the planner can compute each once per candidate
 // instead of once per (start, end) pair. Together they reproduce what
 // addLine() applies. (getHangingPercent()'s last argument is unused.)
-// addLine() only hangs text words, so a line starting or ending with a
-// pad gets no hanging. (A pad's src is an object: its t.font is not a font.)
+// addLine() only hangs text words, so a line starting or ending with an
+// object (pad, image or inline box) gets no hanging. (An object's src
+// t.font is not a font.)
 
 int getOptimalLeftHanging(const KnuthParagraph & p, int first_char, int usable_left_overflow) {
-    if ( isPadChar(p, first_char) )
+    if ( p.flags[first_char] & LCHAR_IS_OBJECT )
         return 0;
     src_text_fragment_t * first_src = p.srcs[first_char];
     LVFont * first_font = first_src ? (LVFont *)first_src->t.font : NULL;
@@ -779,7 +794,7 @@ int getOptimalLeftHanging(const KnuthParagraph & p, int first_char, int usable_l
 
 int getOptimalRightHanging(const KnuthParagraph & p, int last_char, bool hyphenated,
                            int usable_right_overflow) {
-    if ( isPadChar(p, last_char) )
+    if ( p.flags[last_char] & LCHAR_IS_OBJECT )
         return 0;
     src_text_fragment_t * last_src = p.srcs[last_char];
     LVFont * last_font = last_src ? (LVFont *)last_src->t.font : NULL;
@@ -839,12 +854,14 @@ void OptimalBreakSetup::clear() {
     end_hanging.clear();
     end_space_count.clear();
     end_space_width.clear();
+    end_box_width.clear();
     start_pos.clear();
     start_width_before.clear();
     start_first_char.clear();
     start_hanging.clear();
     start_space_count.clear();
     start_space_width.clear();
+    start_box_width.clear();
     start_nonspace_max.clear();
     segment_minimum.clear();
     segment_maximum.clear();
@@ -904,6 +921,7 @@ bool OptimalBreakSetup::prepare(const KnuthParagraph & p,
     // Running state, for the text before the current char unless noted.
     int space_count = 0;       // adjustable word spaces
     int space_width = 0;       // and their natural width
+    int box_width = 0;         // images and inline boxes
     int nonspace_max = std::numeric_limits<int>::min(); // up to and including the current char
     int last_visible = -1;
     int segment_min = -CAPACITY_INF; // word-space limits since the previous candidate
@@ -912,7 +930,8 @@ bool OptimalBreakSetup::prepare(const KnuthParagraph & p,
     int max_start_hanging = 0;
 
     auto addLineStart = [&](int line_start, int spaces_before,
-                            int spaces_width_before, int nonspace) {
+                            int spaces_width_before, int boxes_width_before,
+                            int nonspace) {
         start_pos.push_back(line_start);
         start_width_before.push_back(line_start > 0 ? p.widths[line_start-1] : 0);
         // Starts increase, and the chars the previous scan skipped were
@@ -930,9 +949,10 @@ bool OptimalBreakSetup::prepare(const KnuthParagraph & p,
         start_hanging.push_back(hanging);
         start_space_count.push_back(spaces_before);
         start_space_width.push_back(spaces_width_before);
+        start_box_width.push_back(boxes_width_before);
         start_nonspace_max.push_back(nonspace);
     };
-    addLineStart(0, 0, 0, 0);
+    addLineStart(0, 0, 0, 0, 0);
 
     for ( int i=0; i<p.length; i++ ) {
         int width_before = i > 0 ? p.widths[i-1] : 0;
@@ -956,6 +976,7 @@ bool OptimalBreakSetup::prepare(const KnuthParagraph & p,
             spaces_width_after += char_width;
         }
         bool visible = !(p.flags[i] & IGNORABLE);
+        int boxes_width_after = box_width + (isBoxChar(p, i) ? char_width : 0);
 
         // This char as a break candidate.
         bool candidate = false;
@@ -999,6 +1020,7 @@ bool OptimalBreakSetup::prepare(const KnuthParagraph & p,
             end_hanging.push_back(hanging);
             end_space_count.push_back(drop_space ? space_count : spaces_after);
             end_space_width.push_back(drop_space ? space_width : spaces_width_after);
+            end_box_width.push_back(boxes_width_after); // (a dropped space is no box)
             segment_minimum_excl.push_back(segment_min);
             segment_maximum_excl.push_back(segment_max);
             segment_minimum.push_back(std::max(segment_min, char_space_min));
@@ -1020,9 +1042,9 @@ bool OptimalBreakSetup::prepare(const KnuthParagraph & p,
             // a real hyphen that this language repeats on the next line.
             // Starts stay strictly increasing, as pruning requires.
             if ( !hyphenated && knuthDuplicatesHyphenAfter(p, i) )
-                addLineStart(i, space_count, space_width, nonspace_max);
+                addLineStart(i, space_count, space_width, box_width, nonspace_max);
             else
-                addLineStart(i + 1, spaces_after, spaces_width_after,
+                addLineStart(i + 1, spaces_after, spaces_width_after, boxes_width_after,
                         std::max(nonspace_max, p.widths[i] - spaces_width_after));
         }
         else {
@@ -1031,6 +1053,7 @@ bool OptimalBreakSetup::prepare(const KnuthParagraph & p,
         }
         space_count = spaces_after;
         space_width = spaces_width_after;
+        box_width = boxes_width_after;
         if ( visible )
             last_visible = i;
     }
@@ -1075,24 +1098,24 @@ struct LineJustifier {
     }
 
     // Most tracking the line may take, in the same terms as the planner:
-    // a percentage of the line's natural width.
-    int getDistributedTrackingLimit(int natural_width, bool shrink)
+    // a percentage of the line's glyph width (images and inline boxes left out).
+    int getDistributedTrackingLimit(int trackable_width, bool shrink)
     {
         int percent = shrink ? pbuffer->knuth.tracking_shrink_percent
                              : pbuffer->knuth.tracking_stretch_percent;
-        if ( percent <= 0 || natural_width <= 0 )
+        if ( percent <= 0 || trackable_width <= 0 )
             return 0;
-        return natural_width * percent / 100;
+        return trackable_width * percent / 100;
     }
 
     int applyDistributedTracking(formatted_line_t * frmline, int requested_width,
-                                 int natural_width)
+                                 int trackable_width)
     {
         // Never exceed the configured limits: a line the planner did not
         // fully fit is better left slightly short or overflowing than drawn
         // with overlapping or visibly spread-out glyphs. This also keeps
         // Max + = 0 a renderer-level invariant.
-        int limit = getDistributedTrackingLimit(natural_width, requested_width < 0);
+        int limit = getDistributedTrackingLimit(trackable_width, requested_width < 0);
         if ( requested_width > limit )
             requested_width = limit;
         else if ( requested_width < -limit )
@@ -1173,7 +1196,13 @@ struct LineJustifier {
 
     int applyOptimizedJustification(formatted_line_t * frmline, int extra_width)
     {
-        int natural_width = frmline->width;
+        // What tracking may adjust, as the planner counts it: the line
+        // without its images and inline boxes.
+        int trackable_width = frmline->width;
+        for ( int i=0; i<(int)frmline->word_count; i++ ) {
+            if ( frmline->words[i].flags & (LTEXT_WORD_IS_IMAGE|LTEXT_WORD_IS_INLINE_BOX) )
+                trackable_width -= frmline->words[i].width;
+        }
         int spaces = 0;
         int natural_space_total = 0;
         int min_common_space = 1;
@@ -1207,7 +1236,7 @@ struct LineJustifier {
             if ( extra_width > 0 &&
                     pbuffer->knuth.tracking_stretch_percent == 0 )
                 return 0;
-            return applyDistributedTracking(frmline, extra_width, natural_width);
+            return applyDistributedTracking(frmline, extra_width, trackable_width);
         }
 
         // Pick one absolute space width. Emergency stretch must actually be
@@ -1217,7 +1246,7 @@ struct LineJustifier {
         int desired_space_total = natural_space_total + extra_width;
         int tracking_points = countDistributedTrackingPoints(frmline);
         int tracking_shrink_capacity = tracking_points > 0
-                ? getDistributedTrackingLimit(natural_width, true) : 0;
+                ? getDistributedTrackingLimit(trackable_width, true) : 0;
         // Same choice as the planner made for this line: without emergency
         // stretch, spaces stop at their maximum and tracking stretch (if
         // allowed) does the rest.
@@ -1263,7 +1292,7 @@ struct LineJustifier {
                 pbuffer->knuth.tracking_stretch_percent == 0 )
             return applied;
         if ( remaining != 0 && tracking_points > 0 )
-            applied += applyDistributedTracking(frmline, remaining, natural_width);
+            applied += applyDistributedTracking(frmline, remaining, trackable_width);
         return applied;
     }
 };
@@ -1293,17 +1322,26 @@ bool knuthCanBreakParagraph( const KnuthParagraph & p )
 {
     for ( int i=0; i<p.length; i++ ) {
         // Inline pads (margin/border/padding of inline elements, such as
-        // styled footnote references) are fixed-width boxes: measureText()
-        // has put their width in widths and set their wrap flags.
+        // styled footnote references), inline images and inline-block
+        // boxes are fixed-width boxes: measureText() has put their width
+        // in widths and set their wrap flags. Floats are positioned while
+        // lines are added, which the planner can't foresee.
         if ( isPadChar(p, i) )
             continue;
+        bool object = p.flags[i] & LCHAR_IS_OBJECT;
+        if ( object && p.charindex[i] == p.float_char_index )
+            return false;
         if ( p.text[i] == '\n' ||
-                (p.flags[i] & (LCHAR_IS_OBJECT|LCHAR_IS_CJK|LCHAR_IS_FLEXIBLE_WIDTH_CJK)) )
+                (p.flags[i] & (LCHAR_IS_CJK|LCHAR_IS_FLEXIBLE_WIDTH_CJK)) )
             return false;
         src_text_fragment_t * src = p.srcs[i];
-        if ( !src || (src->flags & (LTEXT_SRC_IS_OBJECT|LTEXT_FLAG_PREFORMATTED|
+        if ( !src || (src->flags & (LTEXT_FLAG_PREFORMATTED|
                                     LTEXT_FLAG_NOWRAP|LTEXT_LOCKED_SPACING|
                                     LTEXT_IS_FIRST_LINE_CLONE)) )
+            return false;
+        if ( object )
+            continue; // an image or inline box: no glyphs
+        if ( src->flags & LTEXT_SRC_IS_OBJECT )
             return false;
         // Ignorable chars are never drawn, so their font coverage
         // does not matter.
