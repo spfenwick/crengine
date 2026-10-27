@@ -4989,9 +4989,19 @@ public:
                                bool preFormattedOnly, bool isLastPara) {
         if ( m_pbuffer->knuth.line_breaking_mode != 1 || preFormattedOnly || m_length < 1 )
             return false;
-        if ( (para->flags & LTEXT_FLAG_NEWLINE) != LTEXT_ALIGN_WIDTH ||
-                (para->flags & LTEXT_LEGACY_RENDERING) )
+        if ( para->flags & LTEXT_LEGACY_RENDERING )
             return false;
+        int align = para->flags & LTEXT_FLAG_NEWLINE;
+        if ( align != LTEXT_ALIGN_WIDTH ) {
+            // A ragged (left-aligned, right-aligned or centered) paragraph,
+            // unless its rag width is 0, or its last line is justified
+            // (its lines are planned with their natural spacing).
+            int last_align = (para->flags >> LTEXT_LAST_LINE_ALIGN_SHIFT) & LTEXT_FLAG_NEWLINE;
+            if ( m_pbuffer->knuth.ragged_width_percent == 0 ||
+                    align < LTEXT_ALIGN_LEFT || align > LTEXT_ALIGN_CENTER ||
+                    last_align == LTEXT_ALIGN_WIDTH )
+                return false;
+        }
         // (m_has_cjk, m_has_images and m_has_inline_boxes stay set for the
         // rest of the final block once met: knuthCanBreakParagraph() checks
         // this paragraph's chars instead.)
