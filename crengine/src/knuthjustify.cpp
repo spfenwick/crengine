@@ -110,14 +110,9 @@ bool isKnuthJustifyProp( const char * propName ) {
 // Same as lvtextfm.cpp's greedy hyphenation
 #define MIN_WORD_LEN_TO_HYPHENATE 4
 #define MAX_WORD_SIZE 64
+static_assert(MAX_WORD_SIZE <= 64, "a word's hyphenation points are one 64-bit mask");
 
 namespace {
-
-
-inline int knuthOpticalLineAdjustment(int target_width, int natural_width,
-                                      int hanging_width) {
-    return target_width - (natural_width - hanging_width);
-}
 
 inline long long knuthTrackingMagnitudeCost(int tracking_basis_points) {
     long long magnitude = tracking_basis_points;
@@ -172,17 +167,15 @@ public:
     // would need the same 64-bit key to get each other's hyphenation
     // points, which for the tens of thousands of distinct words of a book
     // is about a 1 in 10^10 chance.
-    enum { SLOT_COUNT = 65536, MAX_WORD_LEN = 64 }; // MAX_WORD_LEN: bits in points
+    enum { SLOT_COUNT = 65536 };
     struct Slot {
         lUInt64 key;    // 0 when empty
         lUInt64 points; // bit i: a hyphen may follow char i
     };
     // Returns the slot for this word, and its key in key: the slot holds
     // this word's points if slot->key == key, or is to fill with store().
-    // NULL for words too long to cache.
+    // len is at most MAX_WORD_SIZE.
     Slot * find(HyphMethod * method, const lChar32 * word, int len, lUInt64 & key) {
-        if ( len > MAX_WORD_LEN )
-            return NULL;
         if ( !_slots ) {
             _slots = (Slot *)calloc(SLOT_COUNT, sizeof(Slot));
             if ( !_slots )
@@ -223,9 +216,9 @@ struct OptimalBreakCandidate {
 };
 
 
-// Per-paragraph data for buildOptimalBreaks(). It depends only on the
-// paragraph (text, widths, indents, settings), not on a pass's tolerance
-// or stretch options, so it is built once and shared by all passes.
+// Per-paragraph data for search(). It depends only on the paragraph
+// (text, widths, indents, settings), not on a pass's tolerance or
+// stretch options, so it is built once and shared by all passes.
 struct OptimalBreakSetup {
     std::vector<OptimalBreakCandidate> candidates;
     int regular_width;
@@ -266,20 +259,21 @@ struct OptimalBreakSetup {
     std::vector<long long> prune_threshold;
     // The paragraph's last char, which is always the last candidate.
     int last_pos;
-    // Settings the search reads (see the justify_* fields of
-    // formatted_text_fragment_t), and whether tracking is available
+    // The paragraph's settings, and whether tracking is available
     // (HarfBuzz kerning) and punctuation hangs.
+    KnuthJustifyConfig config;
     bool harfbuzz;
     bool hanging_punctuation;
-    int tracking_shrink_percent;
-    int tracking_stretch_percent;
-    int tracking_delta_max_bp;
-    int emergency_stretch_percent;
-    int line_penalty;
-    int adjacent_demerits;
-    int double_hyphen_demerits;
-    int final_hyphen_demerits;
-    int last_line_min_percent;
+
+    /// Fill all the above for a paragraph. false if it has no candidates.
+    bool prepare(const KnuthParagraph & p, const std::vector<bool> & hyphenation);
+    /// Find the best breaks for one pass. false when no layout fits
+    /// within tolerance (and the stretch the pass allows).
+    bool search(std::vector<OptimalLineBreak> & result, int tolerance,
+                bool allow_emergency_stretch, bool unlimited_stretch=false) const;
+private:
+    void clear();
+    void finish(int max_start_hanging);
 };
 
 // A line bound that never prunes (see OptimalBreakSetup::prune_threshold).
@@ -311,13 +305,8 @@ static int optimalLineBadness(int diff, int capacity) {
 // Completes a setup whose per-candidate vectors are filled: makes the
 // overfull bounds monotone and builds the word-space range tables.
 // max_start_hanging is the largest start_hanging.
-void finishOptimalBreakSetup(OptimalBreakSetup & setup, int max_start_hanging) {
-    const int candidate_count = (int)setup.candidates.size();
-    const long long pruning_pct = setup.pruning_pct;
-    const std::vector<int> & start_nonspace_max = setup.start_nonspace_max;
-    const std::vector<int> & segment_minimum = setup.segment_minimum;
-    const std::vector<int> & segment_maximum = setup.segment_maximum;
-    std::vector<long long> & prune_threshold = setup.prune_threshold;
+void OptimalBreakSetup::finish(int max_start_hanging) {
+    const int candidate_count = (int)candidates.size();
     const long long PRUNE_NEVER = OPTIMAL_PRUNE_NEVER;
 
     // The overfull bound, made monotone in the line end too: a start is
@@ -338,7 +327,7 @@ void finishOptimalBreakSetup(OptimalBreakSetup & setup, int max_start_hanging) {
 
     // The widest run of segments the search can ask about: from just
     // after the earliest start the pruning keeps, to just before the end.
-    // (Same pointer walk as in buildOptimalBreaks().)
+    // (Same pointer walk as in search().)
     int max_span = 1;
     {
         int earliest_previous = -1;
@@ -360,8 +349,6 @@ void finishOptimalBreakSetup(OptimalBreakSetup & setup, int max_start_hanging) {
     int sp_levels = 1;
     while ( (1 << sp_levels) <= max_span )
         sp_levels++;
-    std::vector<int> & sp_min = setup.sp_min;
-    std::vector<int> & sp_max = setup.sp_max;
     sp_min.resize(sp_levels * candidate_count);
     sp_max.resize(sp_levels * candidate_count);
     std::copy(segment_minimum.begin(), segment_minimum.end(), sp_min.begin());
@@ -379,55 +366,16 @@ void finishOptimalBreakSetup(OptimalBreakSetup & setup, int max_start_hanging) {
     }
 }
 
-// Finds the best breaks for one pass. Returns false when no layout fits
-// within tolerance (and the stretch the pass allows).
-bool buildOptimalBreaks(const OptimalBreakSetup & setup,
-                        std::vector<OptimalLineBreak> & result,
-                        int tolerance, bool allow_emergency_stretch,
-                        bool unlimited_stretch=false) {
-    // The search below reads the shared setup under its usual names.
-    const std::vector<OptimalBreakCandidate> & candidates = setup.candidates;
-    const std::vector<int> & end_space_count = setup.end_space_count;
-    const std::vector<int> & end_space_width = setup.end_space_width;
-    const std::vector<int> & start_space_count = setup.start_space_count;
-    const std::vector<int> & start_space_width = setup.start_space_width;
-    const std::vector<int> & end_capacity = setup.end_capacity;
-    const std::vector<int> & end_width = setup.end_width;
-    const std::vector<int> & end_last_char = setup.end_last_char;
-    const std::vector<int> & end_hanging = setup.end_hanging;
-    const std::vector<int> & start_pos = setup.start_pos;
-    const std::vector<int> & start_width_before = setup.start_width_before;
-    const std::vector<int> & start_first_char = setup.start_first_char;
-    const std::vector<int> & start_hanging = setup.start_hanging;
-    const std::vector<int> & segment_minimum = setup.segment_minimum;
-    const std::vector<int> & segment_maximum = setup.segment_maximum;
-    const std::vector<int> & segment_minimum_excl = setup.segment_minimum_excl;
-    const std::vector<int> & segment_maximum_excl = setup.segment_maximum_excl;
-    const std::vector<int> & start_nonspace_max = setup.start_nonspace_max;
-    const std::vector<int> & sp_min = setup.sp_min;
-    const std::vector<int> & sp_max = setup.sp_max;
-    const std::vector<long long> & prune_threshold = setup.prune_threshold;
-    const int regular_width = setup.regular_width;
-    const int first_indent = setup.first_indent;
-    const int following_indent = setup.following_indent;
-    const bool if_not_first = setup.if_not_first;
-    const int last_align = setup.last_align;
-    const long long pruning_pct = setup.pruning_pct;
+bool OptimalBreakSetup::search(std::vector<OptimalLineBreak> & result,
+                               int tolerance, bool allow_emergency_stretch,
+                               bool unlimited_stretch) const {
     const int candidate_count = (int)candidates.size();
-    const bool harfbuzz = setup.harfbuzz;
-    const int tracking_shrink_percent = setup.tracking_shrink_percent;
-    const int tracking_stretch_percent = setup.tracking_stretch_percent;
-    const int tracking_delta_max_bp = setup.tracking_delta_max_bp;
     const long long INF = std::numeric_limits<long long>::max() / 8;
     size_t state_count = candidates.size() * 4;
     std::vector<long long> cost(state_count, INF);
     std::vector<int> previous_candidate(state_count, -2);
     std::vector<int> previous_fitness(state_count, -1);
     std::vector<int> last_tracking_basis_points(state_count, 0);
-    // Whether any state of a candidate is reachable. Unreachable starts
-    // are skipped before any line arithmetic: their pairs never update
-    // a cost, so skipping them changes nothing but the time spent.
-    std::vector<char> reachable(candidate_count, 0);
 
     auto foldSegments = [&](int lo, int hi, int & minimum, int & maximum) {
         int level = 31 - __builtin_clz(hi - lo + 1);
@@ -437,7 +385,9 @@ bool buildOptimalBreaks(const OptimalBreakSetup & setup,
         minimum = std::max(minimum, std::max(level_min[lo], level_min[other]));
         maximum = std::min(maximum, std::min(level_max[lo], level_max[other]));
     };
-    // Candidates with at least one reachable state, ascending.
+    // Candidates with at least one reachable state, ascending. Unreachable
+    // starts are skipped before any line arithmetic: their pairs never
+    // update a cost, so skipping them changes nothing but the time spent.
     std::vector<int> reachable_list;
     reachable_list.reserve(candidate_count);
     size_t reachable_from = 0;
@@ -477,7 +427,7 @@ bool buildOptimalBreaks(const OptimalBreakSetup & setup,
             // Account for the exact left/right punctuation (or hyphen)
             // overhang that addLine() will apply while rendering.
             int hanging_width = 0;
-            if ( setup.hanging_punctuation &&
+            if ( hanging_punctuation &&
                     start_first_char[previous+1] <= end_last_char[current] )
                 hanging_width = start_hanging[previous+1] +
                         end_hanging[current];
@@ -488,10 +438,8 @@ bool buildOptimalBreaks(const OptimalBreakSetup & setup,
                     (first_line ? first_indent : following_indent);
             if ( target_width <= 0 )
                 continue;
-            int diff = knuthOpticalLineAdjustment(
-                    target_width, natural_width + hanging_width,
-                    hanging_width);
-            bool final_line = line_end == setup.last_pos;
+            int diff = target_width - natural_width;
+            bool final_line = line_end == last_pos;
             bool last_line_justified = final_line &&
                     last_align == LTEXT_ALIGN_WIDTH &&
                     (!if_not_first || previous >= 0);
@@ -530,9 +478,9 @@ bool buildOptimalBreaks(const OptimalBreakSetup & setup,
                         natural_space_total;
             }
             int tracking_shrink = harfbuzz
-                    ? natural_width * tracking_shrink_percent / 100 : 0;
+                    ? natural_width * config.tracking_shrink_percent / 100 : 0;
             int tracking_stretch = harfbuzz
-                    ? natural_width * tracking_stretch_percent / 100 : 0;
+                    ? natural_width * config.tracking_stretch_percent / 100 : 0;
             int minimum_adjustment = minimum_space_adjustment -
                                      tracking_shrink;
             int maximum_adjustment = maximum_space_adjustment +
@@ -553,7 +501,7 @@ bool buildOptimalBreaks(const OptimalBreakSetup & setup,
             }
             else if ( diff > maximum_adjustment ) {
                 int emergency = target_width *
-                        setup.emergency_stretch_percent / 100;
+                        config.emergency_stretch_percent / 100;
                 emergency_excess = diff - maximum_adjustment;
                 if ( emergency_excess > emergency && !unlimited_stretch )
                     continue;
@@ -611,8 +559,8 @@ bool buildOptimalBreaks(const OptimalBreakSetup & setup,
                                       natural_width);
                 }
             }
-            long long line_cost = (long long)(setup.line_penalty +
-                    badness) * (setup.line_penalty + badness);
+            long long line_cost = (long long)(config.line_penalty +
+                    badness) * (config.line_penalty + badness);
             line_cost += (long long)optical_slack * optical_slack;
             line_cost += knuthTrackingMagnitudeCost(
                     tracking_basis_points);
@@ -637,9 +585,9 @@ bool buildOptimalBreaks(const OptimalBreakSetup & setup,
                 line_cost += (long long)cur.penalty * cur.penalty;
             if ( previous >= 0 && candidates[previous].flagged ) {
                 if ( cur.flagged )
-                    line_cost += setup.double_hyphen_demerits;
+                    line_cost += config.double_hyphen_demerits;
                 if ( final_line )
-                    line_cost += setup.final_hyphen_demerits;
+                    line_cost += config.final_hyphen_demerits;
             }
             if ( ragged_final ) {
                 // A very short paragraph ending is visually conspicuous.
@@ -651,7 +599,7 @@ bool buildOptimalBreaks(const OptimalBreakSetup & setup,
                 // and above about 33% charged almost every ending the
                 // same, so the setting had no visible effect.)
                 int preferred = target_width *
-                        setup.last_line_min_percent / 100;
+                        config.last_line_min_percent / 100;
                 if ( natural_width < preferred ) {
                     double shortfall = (double)(preferred - natural_width) /
                             preferred;
@@ -667,16 +615,16 @@ bool buildOptimalBreaks(const OptimalBreakSetup & setup,
                 if ( prior_cost == INF )
                     continue;
                 if ( previous >= 0 && !ragged_final &&
-                        tracking_delta_max_bp > 0 &&
+                        config.tracking_delta_max_bp > 0 &&
                         std::abs(tracking_basis_points -
                             last_tracking_basis_points[
                                 previous*4 + prior_fitness]) >
-                            tracking_delta_max_bp )
+                            config.tracking_delta_max_bp )
                     continue;
                 long long total = prior_cost + line_cost;
                 if ( previous >= 0 ) {
                     if ( std::abs(fitness - prior_fitness) > 1 )
-                        total += setup.adjacent_demerits;
+                        total += config.adjacent_demerits;
                 }
                 size_t state = current*4 + fitness;
                 if ( total < cost[state] ) {
@@ -689,7 +637,6 @@ bool buildOptimalBreaks(const OptimalBreakSetup & setup,
                 }
             }
         }
-        reachable[current] = any_reachable;
         if ( any_reachable )
             reachable_list.push_back(current);
     }
@@ -715,13 +662,11 @@ bool buildOptimalBreaks(const OptimalBreakSetup & setup,
         result.push_back(OptimalLineBreak(candidates[current].pos,
                                           candidates[current].hyphenated,
                                           allow_emergency_stretch));
-        int next_current = previous_candidate[state];
-        int next_fitness = previous_fitness[state];
-        current = next_current;
-        fitness = next_fitness;
+        current = previous_candidate[state];
+        fitness = previous_fitness[state];
     }
     std::reverse(result.begin(), result.end());
-    return !result.empty() && result.back().pos == setup.last_pos;
+    return !result.empty() && result.back().pos == last_pos;
 }
 
 // ---------------------------------------------------------------------------
@@ -884,34 +829,9 @@ OptimalBreakSetup & optimalSetup() {
     return setup;
 }
 
-bool prepareOptimalBreaks(const KnuthParagraph & p,
-                          const std::vector<bool> & hyphenation,
-                          bool allow_hyphens, OptimalBreakSetup & setup) {
-    const KnuthJustifyConfig & cfg = *p.config;
-    // One forward pass over the paragraph builds the candidates and
-    // everything the search needs about them. The search never reads
-    // per-char data, so only per-candidate values are kept. Vectors are
-    // cleared rather than freed, so they keep their capacity from one
-    // paragraph to the next.
-    std::vector<OptimalBreakCandidate> & candidates = setup.candidates;
-    std::vector<int> & end_capacity = setup.end_capacity;
-    std::vector<int> & end_width = setup.end_width;
-    std::vector<int> & end_last_char = setup.end_last_char;
-    std::vector<int> & end_hanging = setup.end_hanging;
-    std::vector<int> & end_space_count = setup.end_space_count;
-    std::vector<int> & end_space_width = setup.end_space_width;
-    std::vector<int> & start_pos = setup.start_pos;
-    std::vector<int> & start_width_before = setup.start_width_before;
-    std::vector<int> & start_first_char = setup.start_first_char;
-    std::vector<int> & start_hanging = setup.start_hanging;
-    std::vector<int> & start_space_count = setup.start_space_count;
-    std::vector<int> & start_space_width = setup.start_space_width;
-    std::vector<int> & start_nonspace_max = setup.start_nonspace_max;
-    std::vector<int> & segment_minimum = setup.segment_minimum;
-    std::vector<int> & segment_maximum = setup.segment_maximum;
-    std::vector<int> & segment_minimum_excl = setup.segment_minimum_excl;
-    std::vector<int> & segment_maximum_excl = setup.segment_maximum_excl;
-    std::vector<long long> & prune_threshold = setup.prune_threshold;
+void OptimalBreakSetup::clear() {
+    // Vectors are cleared rather than freed, so they keep their capacity
+    // from one paragraph to the next.
     candidates.clear();
     end_capacity.clear();
     end_width.clear();
@@ -931,24 +851,23 @@ bool prepareOptimalBreaks(const KnuthParagraph & p,
     segment_minimum_excl.clear();
     segment_maximum_excl.clear();
     prune_threshold.clear();
+}
 
-    int regular_width = setup.regular_width = p.line_width;
-    int first_indent = setup.first_indent = p.first_indent;
-    int following_indent = setup.following_indent = p.following_indent;
-    setup.if_not_first = p.para_flags & LTEXT_LAST_LINE_IF_NOT_FIRST;
-    setup.last_align = (p.para_flags >> LTEXT_LAST_LINE_ALIGN_SHIFT) & LTEXT_FLAG_NEWLINE;
-    setup.last_pos = p.length - 1;
-    setup.harfbuzz = p.harfbuzz;
-    setup.hanging_punctuation = p.hanging_punctuation;
-    setup.tracking_shrink_percent = cfg.tracking_shrink_percent;
-    setup.tracking_stretch_percent = cfg.tracking_stretch_percent;
-    setup.tracking_delta_max_bp = cfg.tracking_delta_max_bp;
-    setup.emergency_stretch_percent = cfg.emergency_stretch_percent;
-    setup.line_penalty = cfg.line_penalty;
-    setup.adjacent_demerits = cfg.adjacent_demerits;
-    setup.double_hyphen_demerits = cfg.double_hyphen_demerits;
-    setup.final_hyphen_demerits = cfg.final_hyphen_demerits;
-    setup.last_line_min_percent = cfg.last_line_min_percent;
+bool OptimalBreakSetup::prepare(const KnuthParagraph & p,
+                                const std::vector<bool> & hyphenation) {
+    // One forward pass over the paragraph builds the candidates and
+    // everything the search needs about them. The search never reads
+    // per-char data, so only per-candidate values are kept.
+    clear();
+    config = *p.config;
+    regular_width = p.line_width;
+    first_indent = p.first_indent;
+    following_indent = p.following_indent;
+    if_not_first = p.para_flags & LTEXT_LAST_LINE_IF_NOT_FIRST;
+    last_align = (p.para_flags >> LTEXT_LAST_LINE_ALIGN_SHIFT) & LTEXT_FLAG_NEWLINE;
+    last_pos = p.length - 1;
+    harfbuzz = p.harfbuzz;
+    hanging_punctuation = p.hanging_punctuation;
 
     // (The formatter's y stays fixed while planning, and so do these.)
     const int usable_left_overflow = p.usable_left_overflow;
@@ -967,8 +886,8 @@ bool prepareOptimalBreaks(const KnuthParagraph & p,
     // Both sides are monotonic in the line start (a prefix maximum keeps
     // the non-space width monotonic even with negative glyph advances),
     // so once one start is rejected every earlier start is too.
-    long long pruning_pct = setup.pruning_pct = p.harfbuzz
-            ? std::max(0, cfg.tracking_shrink_percent) : 0;
+    pruning_pct = p.harfbuzz
+            ? std::max(0, config.tracking_shrink_percent) : 0;
     long long max_target = (long long)regular_width -
             std::min(first_indent, following_indent);
     const long long PRUNE_NEVER = OPTIMAL_PRUNE_NEVER;
@@ -979,8 +898,8 @@ bool prepareOptimalBreaks(const KnuthParagraph & p,
     // rather than merely applying the same delta to unlike natural spaces.
     const int CAPACITY_INF = std::numeric_limits<int>::max() / 4;
     const int IGNORABLE = LCHAR_IS_SPACE|LCHAR_IS_COLLAPSED_SPACE|LCHAR_IS_TO_IGNORE;
-    const int space_shrink_percent = cfg.space_shrink_percent;
-    const int space_stretch_percent = cfg.space_stretch_percent;
+    const int space_shrink_percent = config.space_shrink_percent;
+    const int space_stretch_percent = config.space_stretch_percent;
 
     // Running state, for the text before the current char unless noted.
     int space_count = 0;       // adjustable word spaces
@@ -1050,13 +969,13 @@ bool prepareOptimalBreaks(const KnuthParagraph & p,
                 !(p.flags[i] & LCHAR_DEPRECATED_WRAP_AFTER) ) {
             candidate = true;
             flagged = p.text[i] == '-' || p.text[i] == UNICODE_HYPHEN;
-            penalty = flagged ? cfg.explicit_hyphen_penalty : 0;
+            penalty = flagged ? config.explicit_hyphen_penalty : 0;
         }
-        else if ( allow_hyphens && hyphenation[i] ) {
+        else if ( hyphenation[i] ) {
             candidate = true;
             hyphenated = true;
             flagged = true;
-            penalty = cfg.hyphen_penalty;
+            penalty = config.hyphen_penalty;
         }
 
         if ( candidate ) {
@@ -1119,7 +1038,7 @@ bool prepareOptimalBreaks(const KnuthParagraph & p,
     if ( candidate_count == 0 )
         return false;
 
-    finishOptimalBreakSetup(setup, max_start_hanging);
+    finish(max_start_hanging);
     return true;
 }
 
@@ -1409,11 +1328,11 @@ bool knuthBreakParagraph( const KnuthParagraph & p, std::vector<OptimalLineBreak
     // line does not send the whole paragraph back to greedy breaking
     // (where none of the Knuth settings apply). Shrink limits stay hard.
     OptimalBreakSetup & setup = optimalSetup();
-    if ( !prepareOptimalBreaks(p, hyphenation, true, setup) )
+    if ( !setup.prepare(p, hyphenation) )
         return false;
-    return buildOptimalBreaks(setup, breaks, p.config->pretolerance, false) ||
-            buildOptimalBreaks(setup, breaks, p.config->tolerance, true) ||
-            buildOptimalBreaks(setup, breaks, 10000, true, true);
+    return setup.search(breaks, p.config->pretolerance, false) ||
+            setup.search(breaks, p.config->tolerance, true) ||
+            setup.search(breaks, 10000, true, true);
 }
 
 void knuthJustifyLine( formatted_line_t * frmline, int extra_width,
