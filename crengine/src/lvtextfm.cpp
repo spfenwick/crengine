@@ -2969,7 +2969,7 @@ public:
                 prev_word->width += shift_x;
                 prev_word->min_width += shift_x;
                 // To see where correction is done, show some overline on the word (also uncomment it in LFormattedText::Draw())
-                // A dedicated debug flag could be set here to visualize corrections.
+                // word->flags |= LTEXT_WORD__AVAILABLE_BIT_16__; (now LTEXT_WORD_HAS_DISTRIBUTED_TRACKING: borrow it while debugging)
             }
             frmline->width += added_x;
             extra_width = usable_width - frmline->width;
@@ -6782,7 +6782,7 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
                     // and chars direction, and if word begins or ends paragraph (for Harfbuzz)
                     drawFlags |= WORD_FLAGS_TO_FNT_FLAGS(word->flags);
                     // For debugging, to visually see overlap/italic correction:
-                    // A dedicated debug flag could add LTEXT_TD_OVERLINE here.
+                    // if (word->flags & LTEXT_WORD__AVAILABLE_BIT_16__ ) drawFlags |= LTEXT_TD_OVERLINE;
                     int x0, y0, w, h;
                     if ( srcline->flags & LTEXT_MATH_TRANSFORM ) {
                         ldomNode * node = (ldomNode *) srcline->object;
