@@ -31,12 +31,21 @@ class CRPropAccessor;
 #define PROP_FORMAT_JUSTIFY_EMERGENCY_STRETCH_PERCENT "crengine.style.justify.emergency.stretch.percent"
 #define PROP_FORMAT_JUSTIFY_LAST_LINE_MIN_PERCENT     "crengine.style.justify.last.line.min.percent"
 #define PROP_FORMAT_JUSTIFY_TRACKING_DELTA_MAX_BP     "crengine.style.justify.tracking.delta.max.bp"
+// Ragged (left-aligned, right-aligned, centered) paragraphs: how far short
+// of the full width a line may fall, in percent of the line width, before
+// it counts as loose (badness 100). 0 leaves them to greedy line breaking.
+#define PROP_FORMAT_RAGGED_WIDTH_PERCENT              "crengine.style.ragged.width.percent"
+// Penalty for an automatic hyphen ending a line of a ragged paragraph (its
+// line costs are on a much smaller scale than justified lines': about 100
+// takes a hyphen only when it saves a fairly short line). Explicit hyphens
+// get none.
+#define PROP_FORMAT_RAGGED_HYPHEN_PENALTY             "crengine.style.ragged.hyphen.penalty"
 
 /// Line breaking settings, one per property above (their defaults and
 /// allowed ranges are in knuthjustify.cpp). Greedy mode ignores all but
 /// line_breaking_mode.
 struct KnuthJustifyConfig {
-    int line_breaking_mode; // 0: greedy, 1: Knuth-Plass optimization of suitable justified paragraphs
+    int line_breaking_mode; // 0: greedy, 1: Knuth-Plass optimization of suitable paragraphs
     int space_shrink_percent;
     int space_stretch_percent;
     int tracking_shrink_percent;
@@ -52,6 +61,8 @@ struct KnuthJustifyConfig {
     int emergency_stretch_percent;
     int last_line_min_percent;
     int tracking_delta_max_bp;
+    int ragged_width_percent;
+    int ragged_hyphen_penalty;
 
     /// all defaults
     KnuthJustifyConfig();
