@@ -40,6 +40,10 @@ class CRPropAccessor;
 // takes a hyphen only when it saves a fairly short line). Explicit hyphens
 // get none.
 #define PROP_FORMAT_RAGGED_HYPHEN_PENALTY             "crengine.style.ragged.hyphen.penalty"
+// Read-only: the git commit this engine was built from (set at every
+// propsUpdateDefaults, so writing it has no lasting effect). Lets the
+// KOReader plugin tell which engine build is installed.
+#define PROP_KNUTH_PLASS_BUILD                        "crengine.knuth.plass.build"
 
 /// Line breaking settings, one per property above (their defaults and
 /// allowed ranges are in knuthjustify.cpp). Greedy mode ignores all but
