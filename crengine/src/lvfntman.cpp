@@ -22,6 +22,7 @@
 #include "../include/lvdrawbuf.h"
 #include "../include/lvstyles.h"
 #include "../include/lvthread.h"
+#include "../include/knuthjustify.h"
 
 // Uncomment for debugging text measurement or drawing
 // #define DEBUG_MEASURE_TEXT
@@ -4535,16 +4536,27 @@ public:
             int fb_t_start = 0;
             int fb_t_end = len;
             int hg = 0;  // index in glyph_info/glyph_pos
-            int fractional_positioning_granularity = getFractionalGlyphPositioningGranularity();
-            bool use_fractional_positioning = fractional_positioning_granularity > 1;
-            lInt32 x_64 = x * 64;
             int tracking_width = distributed_tracking ? target_w : 0;
             lUInt32 tracking_packed = distributed_tracking
                     ? (lUInt32)target_h : 0;
             int tracking_points = tracking_packed & 0xFFFF;
-            int tracking_points_done = tracking_packed >> 16;
+            int tracking_start = tracking_packed >> 16;
+            int tracking_points_done = tracking_start;
             int tracking_width_done = tracking_points > 0
-                    ? tracking_width * tracking_points_done / tracking_points : 0;
+                    ? tracking_width * tracking_start / tracking_points : 0;
+            int tracking_width_done_x64 = knuthDistributedTrackingX64(
+                    tracking_width, tracking_start, tracking_points);
+            int fractional_positioning_granularity = getFractionalGlyphPositioningGranularity();
+            bool use_fractional_positioning = fractional_positioning_granularity > 1;
+            lInt32 x_64 = x * 64;
+            if ( use_fractional_positioning && tracking_points > 0 ) {
+                // word->x already contains the integer part assigned during
+                // layout. Restore the line accumulator's fractional part so
+                // kerning and tracking advance one continuous 26.6 pen even
+                // though words are drawn in separate calls.
+                x_64 += tracking_width_done_x64 - tracking_width_done * 64;
+                x = FONT_METRIC_TO_PX(x_64);
+            }
             while (hg < glyph_count) { // hg is the start of a new cluster at this point
                 bool draw_with_fallback = false;
                 int hcl = glyph_info[hg].cluster;
@@ -4835,8 +4847,21 @@ public:
                             tracking_points_done++;
                             int target_done = tracking_width *
                                     tracking_points_done / tracking_points;
-                            x += target_done - tracking_width_done;
-                            x_64 += (target_done - tracking_width_done) * 64;
+                            if ( use_fractional_positioning ) {
+                                int target_done_x64 = knuthDistributedTrackingX64(
+                                        tracking_width, tracking_points_done,
+                                        tracking_points);
+                                x_64 += target_done_x64 -
+                                        tracking_width_done_x64;
+                                x = FONT_METRIC_TO_PX(x_64);
+                                tracking_width_done_x64 = target_done_x64;
+                            }
+                            else {
+                                int tracking_delta = target_done -
+                                        tracking_width_done;
+                                x += tracking_delta;
+                                x_64 = x * 64;
+                            }
                             tracking_width_done = target_done;
                         }
                     }
