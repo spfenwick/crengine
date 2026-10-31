@@ -464,7 +464,6 @@ public:
     bool m_hanging_punctuation;
     bool m_using_optimal_breaks;
     bool m_using_optimized_spacing;
-    bool m_mark_greedy_fallback;
     bool m_indent_first_line_done;
     int  m_indent_after_first_line;
     int  m_indent_current;
@@ -538,7 +537,6 @@ public:
         m_formatted_initial_letter_ink_end_y = 0;
         m_using_optimal_breaks = false;
         m_using_optimized_spacing = false;
-        m_mark_greedy_fallback = false;
         m_initial_letter_exclusion.active = false;
         m_initial_letter_exclusion.is_carried = false;
         m_initial_letter_exclusion.node_id = 0;
@@ -2874,103 +2872,7 @@ public:
         return total;
     }
 
-    int getOpticalWordGapPadding(formatted_word_t * word,
-                                 formatted_word_t * next_word)
-    {
-        if ( !word || !next_word || word->distinct_glyphs <= 0 ||
-                next_word->distinct_glyphs <= 0 ||
-                (word->flags & (LTEXT_WORD_IS_IMAGE|LTEXT_WORD_IS_INLINE_BOX|
-                                LTEXT_WORD_IS_PAD)) ||
-                (next_word->flags & (LTEXT_WORD_IS_IMAGE|
-                                     LTEXT_WORD_IS_INLINE_BOX|
-                                     LTEXT_WORD_IS_PAD)) )
-            return 0;
-        src_text_fragment_t * src =
-                &m_pbuffer->srctext[word->src_text_index];
-        src_text_fragment_t * next_src =
-                &m_pbuffer->srctext[next_word->src_text_index];
-        LVFont * font = (LVFont *)src->t.font;
-        LVFont * next_font = (LVFont *)next_src->t.font;
-        if ( !font || !next_font || word->t.len == 0 ||
-                next_word->t.len == 0 )
-            return 0;
-
-        int last = word->t.start + word->t.len - 1;
-        while ( last >= word->t.start &&
-                (src->t.text[last] == ' ' || src->t.text[last] == '\t' ||
-                 src->t.text[last] == UNICODE_NO_BREAK_SPACE) )
-            last--;
-        int first = next_word->t.start;
-        int next_end = next_word->t.start + next_word->t.len;
-        while ( first < next_end &&
-                (next_src->t.text[first] == ' ' ||
-                 next_src->t.text[first] == '\t' ||
-                 next_src->t.text[first] == UNICODE_NO_BREAK_SPACE) )
-            first++;
-        if ( last < word->t.start || first >= next_end )
-            return 0;
-
-        // Positive side bearings are blank pixels already present between
-        // glyph ink and the nominal word-space advance; negative bearings let
-        // ink overhang into that advance. Equal visible gaps therefore need
-        // different advances when neighbouring edge glyphs differ.
-        int padding = font->getRightSideBearing(src->t.text[last]) +
-                      next_font->getLeftSideBearing(next_src->t.text[first]);
-        int limit = std::max(font->getSize(), next_font->getSize()) / 2;
-        return std::max(-limit, std::min(limit, padding));
-    }
-
-    int applyOpticalWordSpacing(formatted_line_t * frmline,
-                                int target_space_width)
-    {
-        int spaces = 0;
-        int padding_sum = 0;
-        for ( int i=0; i<(int)frmline->word_count-1; i++ ) {
-            formatted_word_t * word = &frmline->words[i];
-            if ( word->flags & LTEXT_WORD_CAN_ADD_SPACE_AFTER ) {
-                spaces++;
-                padding_sum += getOpticalWordGapPadding(
-                        word, &frmline->words[i+1]);
-            }
-        }
-        if ( spaces == 0 )
-            return 0;
-
-        const auto roundedDivision = [](long long value, int divisor) {
-            return value >= 0
-                    ? (int)((value + divisor / 2) / divisor)
-                    : (int)((value - divisor / 2) / divisor);
-        };
-        long long cumulative = 0;
-        int shift_x = 0;
-        int total = 0;
-        for ( int i=0; i<(int)frmline->word_count; i++ ) {
-            formatted_word_t * word = &frmline->words[i];
-            word->x += shift_x;
-            if ( i >= (int)frmline->word_count-1 ||
-                    !(word->flags & LTEXT_WORD_CAN_ADD_SPACE_AFTER) )
-                continue;
-            int padding = getOpticalWordGapPadding(
-                    word, &frmline->words[i+1]);
-            int before = roundedDivision(cumulative, spaces);
-            cumulative += padding_sum - (long long)padding * spaces;
-            int after = roundedDivision(cumulative, spaces);
-            int optical_space_width = std::max(1,
-                    target_space_width + after - before);
-            int delta = optical_space_width -
-                    getNaturalWordSpaceWidth(word);
-            word->width += delta;
-            word->min_width += delta;
-            shift_x += delta;
-            total += delta;
-        }
-        frmline->width += total;
-        return total;
-    }
-
-    int applyOptimizedJustification(formatted_line_t * frmline,
-                                    int extra_width,
-                                    bool optical_word_spacing)
+    int applyOptimizedJustification(formatted_line_t * frmline, int extra_width)
     {
         int spaces = 0;
         int natural_space_total = 0;
@@ -3047,9 +2949,7 @@ public:
                     spaces;
             target_space = std::max(1, target_space - lower_by);
         }
-        int applied = optical_word_spacing
-                ? applyOpticalWordSpacing(frmline, target_space)
-                : applyFixedWordSpacing(frmline, target_space);
+        int applied = applyFixedWordSpacing(frmline, target_space);
         int remaining = extra_width - applied;
         if ( remaining > 0 &&
                 m_pbuffer->justify_tracking_stretch_percent == 0 )
@@ -3059,8 +2959,7 @@ public:
         return applied;
     }
 
-    void alignLine( formatted_line_t * frmline, int alignment, int rightIndent=0,
-                    bool hasInlineBoxes=false, bool first=false ) {
+    void alignLine( formatted_line_t * frmline, int alignment, int rightIndent=0, bool hasInlineBoxes=false ) {
         // Fetch current line x offset and max width
         int x_offset;
         int width = getAvailableWidthAtY(m_y, m_pbuffer->strut_height, x_offset);
@@ -3414,8 +3313,7 @@ public:
                 alignment == LTEXT_ALIGN_WIDTH && !m_has_cjk && !m_has_bidi &&
                 frmline->word_count > 1;
         if ( optimized_adjustment ) {
-            applyOptimizedJustification(frmline, extra_width,
-                    m_pbuffer->line_breaking_mode == 2);
+            applyOptimizedJustification(frmline, extra_width);
             extra_width = usable_width - frmline->width;
         }
         // Optimized addLine() temporarily carries each word's natural
@@ -4010,8 +3908,6 @@ public:
             // Might be useful (we may have a bidi line in a LTR paragraph).
             // (Used for ordering in-page footnote links)
         }
-        if ( first && m_mark_greedy_fallback )
-            frmline->flags |= LTEXT_LINE_GREEDY_FALLBACK;
 
         if ( preFormattedOnly && (start == end) ) {
             // Specific for preformatted text when consecutive \n\n:
@@ -5226,7 +5122,7 @@ public:
 
         if ( !light_formatting ) {
             // Fix up words position and width to ensure requested alignment and indent
-            alignLine( frmline, align, rightIndent, hasInlineBoxes, first );
+            alignLine( frmline, align, rightIndent, hasInlineBoxes );
         }
 
         if ( initial_letter_word_index >= 0 ) {
@@ -6232,7 +6128,6 @@ public:
     void processParagraph( int start, int end, bool isLastPara )
     {
         TR("processParagraph(%d, %d)", start, end);
-        m_mark_greedy_fallback = false;
 
         // ensure buffer size is ok for paragraph
         allocate( start, end );
@@ -6266,23 +6161,6 @@ public:
 
         if ( tryOptimizedParagraph(para, preFormattedOnly, isLastPara) )
             return;
-
-        // Mark only paragraphs that were intended for optimized justified
-        // breaking but had to use the legacy greedy formatter (unsupported
-        // structure or a physically impossible optimized path). The first
-        // greedy line carries the bit so Draw() can show one unobtrusive dot.
-        m_mark_greedy_fallback = m_pbuffer->line_breaking_mode == 1 &&
-                (para->flags & LTEXT_FLAG_NEWLINE) == LTEXT_ALIGN_WIDTH &&
-                !(para->flags & LTEXT_LEGACY_RENDERING);
-
-        // Hybrid mode deliberately keeps the legacy Greedy line-break
-        // sequence, but gives suitable justified Latin paragraphs the same
-        // equal word spaces and bounded distributed microtracking used by the
-        // optimized renderer. Unsupported structures retain stock Greedy
-        // spacing, avoiding the old optimized-fallback collision bug.
-        m_using_optimized_spacing =
-                m_pbuffer->line_breaking_mode == 2 &&
-                canOptimizeParagraph(para, preFormattedOnly);
 
         // Not per-specs, but when floats reduce the available width, skip y until
         // we have the width to draw at least a few chars on a line.
@@ -7380,7 +7258,7 @@ void LFormattedText::setMaxAddedLetterSpacingPercent(int maxAddedLetterSpacingPe
 
 void LFormattedText::setLineBreakingMode(int lineBreakingMode)
 {
-    if (lineBreakingMode>=0 && lineBreakingMode<=2)
+    if (lineBreakingMode>=0 && lineBreakingMode<=1)
         m_pbuffer->line_breaking_mode = lineBreakingMode;
 }
 
@@ -7871,21 +7749,6 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
                 }
             }
 #endif
-
-            if ( frmline->flags & LTEXT_LINE_GREEDY_FALLBACK ) {
-                // A tiny square just before the first-line text indent marks
-                // an optimized paragraph that actually used greedy fallback.
-                // With no indent it sits in the left margin and may be clipped,
-                // which is preferable to covering the first glyph.
-                const int marker_size = 3;
-                int marker_x = x + frmline->x - marker_size - 2;
-                if ( frmline->flags & LTEXT_LINE_PARA_IS_RTL )
-                    marker_x = x + frmline->x + frmline->width + 2;
-                int marker_y = line_y + frmline->baseline - marker_size;
-                buf->FillRect(marker_x, marker_y,
-                        marker_x + marker_size, marker_y + marker_size,
-                        buf->GetTextColor());
-            }
 
             int text_decoration_back_gap;
             lUInt16 lastWordSrcIndex;
