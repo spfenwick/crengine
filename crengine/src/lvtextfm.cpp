@@ -5291,8 +5291,6 @@ public:
         // excludes outer floats that are not represented in this paragraph.
         if ( getCurrentLineX() != 0 || getCurrentLineWidth() != m_pbuffer->width )
             return false;
-        std::vector<std::pair<LVFont *, lChar32> > checked_glyphs;
-        checked_glyphs.reserve(64);
         for ( int i=0; i<m_length; i++ ) {
             if ( m_text[i] == '\n' ||
                     (m_flags[i] & (LCHAR_IS_CJK|LCHAR_IS_FLEXIBLE_WIDTH_CJK)) )
@@ -5310,18 +5308,8 @@ public:
             if ( m_kerning_mode == KERNING_MODE_HARFBUZZ &&
                     !(m_flags[i] & LCHAR_IS_SPACE) ) {
                 LVFont * font = (LVFont *)src->t.font;
-                if ( !font )
+                if ( !font || !font->hasGlyph(m_text[i]) )
                     return false;
-                std::pair<LVFont *, lChar32> key(font, m_text[i]);
-                std::vector<std::pair<LVFont *, lChar32> >::iterator found =
-                        std::lower_bound(checked_glyphs.begin(),
-                                         checked_glyphs.end(), key);
-                if ( found == checked_glyphs.end() || *found != key ) {
-                    LVFont::glyph_info_t glyph;
-                    if ( !font->getGlyphInfo(m_text[i], &glyph, 0) )
-                        return false;
-                    checked_glyphs.insert(found, key);
-                }
             }
         }
         return true;

@@ -451,6 +451,14 @@ public:
     */
     virtual bool getGlyphInfo( lUInt32 code, glyph_info_t * glyph, lChar32 def_char=0, bool code_is_glyph_index=false, bool is_fallback=false ) = 0;
 
+    /// true if this font or its fallback chain has a glyph for code. Same
+    /// answer as getGlyphInfo(code, &glyph, 0), but fonts may override it to
+    /// skip loading and hinting the glyph.
+    virtual bool hasGlyph( lUInt32 code, bool is_fallback=false ) {
+        glyph_info_t glyph;
+        return getGlyphInfo( code, &glyph, 0, false, is_fallback );
+    }
+
     /** \brief add glyph SVG path to SVGGlyphsCollector
     */
     virtual bool collectGlyphSVGPath(SVGGlyphsCollector * svg_collector, lUInt32 code, bool code_is_glyph_index=false, bool is_fallback=false) { return false; }
