@@ -176,6 +176,10 @@ typedef struct
    };
    lInt16   added_letter_spacing;    /* letter-spacing (to reduce spacing when justified) to add when drawing this word */
    lInt16   distinct_glyphs;         /* nb of glyphs in this word that can have letter-spacing added to */
+   lInt16   natural_space_width;     /* natural width of an adjustable trailing word space */
+   lInt16   distributed_tracking;    /* total line-wide microtracking adjustment in pixels */
+   lInt16   distributed_tracking_start;  /* glyph-gap offset of this word in the line-wide distribution */
+   lInt16   distributed_tracking_points; /* total glyph gaps participating in the line-wide distribution */
    lInt16   _top_to_baseline;        /* temporary storage slots when delaying y computation, */
    lInt16   _baseline_to_bottom;     /* when valign top or bottom */
    // lUInt16  padding;         /**< \brief not used */

@@ -462,8 +462,6 @@ public:
     int  m_usable_left_overflow;
     int  m_usable_right_overflow;
     bool m_hanging_punctuation;
-    bool m_using_optimal_breaks;
-    bool m_using_optimized_spacing;
     bool m_indent_first_line_done;
     int  m_indent_after_first_line;
     int  m_indent_current;
@@ -535,8 +533,6 @@ public:
         m_hanging_punctuation = false;
         m_formatted_initial_letter_id = 0;
         m_formatted_initial_letter_ink_end_y = 0;
-        m_using_optimal_breaks = false;
-        m_using_optimized_spacing = false;
         m_initial_letter_exclusion.active = false;
         m_initial_letter_exclusion.is_carried = false;
         m_initial_letter_exclusion.node_id = 0;
@@ -2801,6 +2797,9 @@ public:
         for ( int i=0; i<(int)frmline->word_count; i++ ) {
             formatted_word_t * word = &frmline->words[i];
             word->flags &= ~LTEXT_WORD_HAS_DISTRIBUTED_TRACKING;
+            word->distributed_tracking = 0;
+            word->distributed_tracking_start = 0;
+            word->distributed_tracking_points = 0;
         }
         if ( requested_width == 0 || tracking_points == 0 )
             return 0;
@@ -2821,10 +2820,9 @@ public:
                 // Keep one accumulator for the full visual line. Restarting
                 // the division in every word concentrates a small remainder
                 // in one short word, making only that word look tracked out.
-                // alignLine() runs after vertical metrics are finalized, so
-                // these two existing scratch slots are free for draw metadata.
-                word->_top_to_baseline = requested_width;
-                word->_baseline_to_bottom = points_done;
+                word->distributed_tracking = requested_width;
+                word->distributed_tracking_start = points_done;
+                word->distributed_tracking_points = tracking_points;
             }
             word->width += added;
             word->min_width += added;
@@ -2837,9 +2835,7 @@ public:
 
     int getNaturalWordSpaceWidth(formatted_word_t * word)
     {
-        // Optimized addLine() temporarily carries the natural trailing-space
-        // width in this existing field; alignLine() clears it before Draw().
-        int natural = word->added_letter_spacing;
+        int natural = word->natural_space_width;
         if ( natural <= 0 )
             natural = std::max(1, word->width - word->min_width);
         return natural;
@@ -3186,7 +3182,7 @@ public:
 
         // We might want to prevent this when LangCfg == "de" (in german,
         // letter spacing is used for emphasis)
-        if ( !m_using_optimized_spacing &&
+        if ( m_pbuffer->line_breaking_mode == 0 &&
                         m_pbuffer->max_added_letter_spacing_percent > 0 // only if allowed
                         && alignment == LTEXT_ALIGN_WIDTH    // only when justifying
                         && frmline->word_count > 1           // not if single word (expanded, but not taking the full width is ugly)
@@ -3309,22 +3305,12 @@ public:
         }
         extra_width = usable_width - frmline->width;
 
-        bool optimized_adjustment = m_using_optimized_spacing &&
+        bool optimized_adjustment = m_pbuffer->line_breaking_mode == 1 &&
                 alignment == LTEXT_ALIGN_WIDTH && !m_has_cjk && !m_has_bidi &&
                 frmline->word_count > 1;
         if ( optimized_adjustment ) {
             applyOptimizedJustification(frmline, extra_width);
             extra_width = usable_width - frmline->width;
-        }
-        // Optimized addLine() temporarily carries each word's natural
-        // trailing-space width in added_letter_spacing. It is draw metadata
-        // in the normal formatter, so clear the carrier on every optimized
-        // line, including a paragraph's ragged (left-aligned) final line.
-        // Leaving it set there makes Draw() spread the letters inside each
-        // word by the width of a space while word positions stay unchanged.
-        if ( m_using_optimized_spacing ) {
-            for ( int i=0; i<(int)frmline->word_count; i++ )
-                frmline->words[i].added_letter_spacing = 0;
         }
 
         if ( m_has_cjk && extra_width < 0 && frmline->word_count > 1
@@ -4181,6 +4167,10 @@ public:
                 formatted_word_t * word = lvtextAddFormattedWord(frmline);
                 src_text_fragment_t * srcline = m_srcs[wstart]; // should be identical to lastSrc
                 word->src_text_index = srcline->index;
+                word->natural_space_width = 0;
+                word->distributed_tracking = 0;
+                word->distributed_tracking_start = 0;
+                word->distributed_tracking_points = 0;
 
                 // This LTEXT_VALIGN_ flag is now only of use with objects (images)
                 int vertical_align_flag = srcline->flags & LTEXT_VALIGN_MASK;
@@ -4644,9 +4634,8 @@ public:
                     bool preformatted = srcline->flags & LTEXT_FLAG_PREFORMATTED;
                     if ( m_flags[i-1] & LCHAR_IS_SPACE ) {
                         // Current word ends with a space.
-                        if ( m_using_optimized_spacing )
-                            word->added_letter_spacing = m_widths[i-1] -
-                                    (i > 1 ? m_widths[i-2] : 0);
+                        word->natural_space_width = m_widths[i-1] -
+                                (i > 1 ? m_widths[i-2] : 0);
                         // Each word ending with a space (except in some conditions) can
                         // have its width reduced by a fraction of this space width or
                         // increased if needed (for text justification), so actually
@@ -6101,8 +6090,6 @@ public:
         }
 
         int pos = 0;
-        m_using_optimal_breaks = true;
-        m_using_optimized_spacing = true;
         for ( size_t i=0; i<breaks.size(); i++ ) {
             int x = m_indent_current;
             if ( !m_indent_first_line_done ) {
@@ -6119,8 +6106,6 @@ public:
             m_flags[wrap_pos] = saved_flags;
             pos = wrap_pos + 1;
         }
-        m_using_optimal_breaks = false;
-        m_using_optimized_spacing = false;
         return pos >= m_length;
     }
 
@@ -6854,7 +6839,6 @@ public:
             #endif
         }
 
-        m_using_optimized_spacing = false;
     }
 
     void processEmbeddedBlock( int idx )
@@ -7752,15 +7736,6 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
 
             int text_decoration_back_gap;
             lUInt16 lastWordSrcIndex;
-            int distributed_tracking_points = 0;
-            for ( j=0; j<frmline->word_count; j++ ) {
-                if ( frmline->words[j].flags &
-                        LTEXT_WORD_HAS_DISTRIBUTED_TRACKING ) {
-                    int points = frmline->words[j].distinct_glyphs;
-                    if ( points > 1 )
-                        distributed_tracking_points += points - 1;
-                }
-            }
             for (j=0; j<frmline->word_count; j++)
             {
                 word = &frmline->words[j];
@@ -7943,11 +7918,11 @@ void LFormattedText::Draw( LVDrawBuf * buf, int x, int y, ldomMarkedRangeList * 
                     }
                     if ( (word->flags & LTEXT_WORD_HAS_DISTRIBUTED_TRACKING) &&
                             word->distinct_glyphs > 1 &&
-                            distributed_tracking_points > 0 ) {
+                            word->distributed_tracking_points > 0 ) {
                         drawFlags |= LFNT_HINT_DISTRIBUTED_TRACKING;
-                        w = word->_top_to_baseline;
-                        h = ((lUInt32)word->_baseline_to_bottom << 16) |
-                                (lUInt16)distributed_tracking_points;
+                        w = word->distributed_tracking;
+                        h = ((lUInt32)word->distributed_tracking_start << 16) |
+                                (lUInt16)word->distributed_tracking_points;
                     }
                     font->DrawTextString(
                         buf,
