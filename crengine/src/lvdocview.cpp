@@ -6826,8 +6826,8 @@ void LVDocView::propsUpdateDefaults(CRPropRef props) {
     p = props->getIntDef(PROP_FORMAT_LINE_BREAKING_MODE, DEF_LINE_BREAKING_MODE);
     if (p<0)
         p = 0;
-    if (p>2)
-        p = 2;
+    if (p>1)
+        p = 1;
     props->setInt(PROP_FORMAT_LINE_BREAKING_MODE, p);
 
     struct JustifyIntLimit {
@@ -7298,7 +7298,7 @@ CRPropRef LVDocView::propsApply(CRPropRef props) {
                         m_props->getIntDef(PROP_FORMAT_JUSTIFY_EMERGENCY_STRETCH_PERCENT, DEF_JUSTIFY_EMERGENCY_STRETCH_PERCENT),
                         m_props->getIntDef(PROP_FORMAT_JUSTIFY_LAST_LINE_MIN_PERCENT, DEF_JUSTIFY_LAST_LINE_MIN_PERCENT),
                         m_props->getIntDef(PROP_FORMAT_JUSTIFY_TRACKING_DELTA_MAX_BP, DEF_JUSTIFY_TRACKING_DELTA_MAX_BP)))
-                    REQUEST_RENDER("propsApply optimized justification config")
+                    REQUEST_RENDER("propsApply Knuth-Plass justification config")
         } else if (name == PROP_FORMAT_CJK_WIDTH_SCALE_PERCENT) {
             int value = props->getIntDef(PROP_FORMAT_CJK_WIDTH_SCALE_PERCENT, DEF_CJK_WIDTH_SCALE_PERCENT);
             if (m_doc) // not when noDefaultDocument=true

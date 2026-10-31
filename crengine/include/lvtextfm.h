@@ -218,7 +218,7 @@ typedef struct
 #define LTEXT_LINE_IS_BIDI                   0x04
 #define LTEXT_LINE_PARA_IS_RTL               0x08
 
-#define LTEXT_LINE_GREEDY_FALLBACK            0x10 /// first line of a paragraph that fell back from optimized to greedy breaking
+#define LTEXT_LINE__AVAILABLE_BIT_05__       0x10
 #define LTEXT_LINE__AVAILABLE_BIT_06__       0x20
 #define LTEXT_LINE__AVAILABLE_BIT_07__       0x40
 #define LTEXT_LINE__AVAILABLE_BIT_08__       0x80
@@ -318,7 +318,7 @@ typedef struct
    lInt32                unused_space_threshold_percent; /**< % (of line width) of unused space on a line to trigger hyphenation,
                                                               or addition of letter spacing for justification  */
    lInt32                max_added_letter_spacing_percent; /**< Max allowed added letter spacing (% of font size) */
-   lInt32                line_breaking_mode; /**< 0: greedy, 1: paragraph-wide optimization, 2: greedy breaks with optimized spacing */
+   lInt32                line_breaking_mode; /**< 0: greedy, 1: Knuth-Plass optimization of suitable justified paragraphs */
    lInt32                justify_space_shrink_percent;
    lInt32                justify_space_stretch_percent;
    lInt32                justify_tracking_shrink_percent;
@@ -452,11 +452,10 @@ public:
     /// set max allowed added letter spacing (0..20% of font size)
     void setMaxAddedLetterSpacingPercent(int maxAddedLetterSpacingPercent);
 
-    /// set line breaking mode (0: greedy, 1: paragraph-wide optimization,
-    /// 2: greedy breaks with optimized spacing)
+    /// set line breaking mode (0: greedy, 1: Knuth-Plass paragraph optimization)
     void setLineBreakingMode(int lineBreakingMode);
 
-    /// set paragraph-wide justification limits and penalties
+    /// set Knuth-Plass justification limits and penalties
     void setJustificationConfig(
             int spaceShrinkPercent, int spaceStretchPercent,
             int trackingShrinkPercent, int trackingStretchPercent,
