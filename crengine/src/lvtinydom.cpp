@@ -18905,10 +18905,9 @@ lUInt32 tinyNodeCollection::calcStyleHash(bool already_rendered, lUInt32 force_n
     res = res * 31 + _spaceWidthScalePercent;
     res = res * 31 + _minSpaceCondensingPercent;
     res = res * 31 + _unusedSpaceThresholdPercent;
-    // Optimized justification changes line breaks, paragraph heights and
-    // pagination. Keep it in the persistent style hash so a second rendering
-    // pass cannot reuse incomplete chapter fragments from another mode/config.
-    res = res * 31 + 24; // optimized-justification layout hash version
+    // Knuth-Plass line breaking changes line breaks, paragraph heights and
+    // pagination, so it must invalidate any rendering made with another
+    // mode or configuration.
     res = res * 31 + _lineBreakingMode;
     res = res * 31 + _justifySpaceShrinkPercent;
     res = res * 31 + _justifySpaceStretchPercent;
