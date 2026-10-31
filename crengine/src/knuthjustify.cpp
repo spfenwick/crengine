@@ -14,6 +14,11 @@
 // ---------------------------------------------------------------------------
 // Settings
 
+// Set by CMake from `git rev-parse` (see CMakeLists.txt).
+#ifndef KNUTH_PLASS_BUILD
+#define KNUTH_PLASS_BUILD "unknown"
+#endif
+
 namespace {
 
 struct KnuthJustifyProp {
@@ -96,6 +101,7 @@ void knuthJustifyPropsUpdateDefaults( CRPropAccessor * props ) {
         const KnuthJustifyProp & prop = knuthJustifyProps[i];
         props->setInt(prop.name, getClampedProp(props, prop));
     }
+    props->setString(PROP_KNUTH_PLASS_BUILD, KNUTH_PLASS_BUILD);
 }
 
 bool isKnuthJustifyProp( const char * propName ) {

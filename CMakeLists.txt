@@ -285,6 +285,40 @@ target_include_directories(crengine PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 target_include_directories(crengine PUBLIC crengine/include)
 target_link_libraries(crengine PRIVATE ${CRE_LIBS})
 
+# The commit this engine is built from, reported to Lua as the
+# `crengine.knuth.plass.build` property. Can be given with
+# `-DKNUTH_PLASS_BUILD=…` or the environment variable of the same name
+# (for builds from a source tarball, or where git can't read the checkout).
+if(NOT KNUTH_PLASS_BUILD AND DEFINED ENV{KNUTH_PLASS_BUILD})
+    set(KNUTH_PLASS_BUILD "$ENV{KNUTH_PLASS_BUILD}")
+endif()
+if(NOT KNUTH_PLASS_BUILD)
+    execute_process(
+        COMMAND git rev-parse --short=12 HEAD
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        OUTPUT_VARIABLE KNUTH_PLASS_BUILD
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    # Configure again after a commit or checkout, so it stays current.
+    execute_process(
+        COMMAND git rev-parse --absolute-git-dir
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        OUTPUT_VARIABLE KNUTH_PLASS_GIT_DIR
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if(EXISTS "${KNUTH_PLASS_GIT_DIR}/logs/HEAD")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+            "${KNUTH_PLASS_GIT_DIR}/logs/HEAD")
+    endif()
+endif()
+if(KNUTH_PLASS_BUILD)
+    # Only on this file, so a new commit doesn't rebuild everything.
+    set_source_files_properties(crengine/src/knuthjustify.cpp PROPERTIES
+        COMPILE_DEFINITIONS "KNUTH_PLASS_BUILD=\"${KNUTH_PLASS_BUILD}\"")
+endif()
+
 # }}}
 
 # linting {{{

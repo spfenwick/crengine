@@ -1,0 +1,20 @@
+# Asks spfenwick/knuth-plass-plugin to build and publish this engine for the
+# plugin's updater. Needs the secret PLUGIN_DISPATCH_TOKEN: a fine-grained
+# token for that repository with "Contents: read and write".
+name: Notify Knuth–Plass plugin
+
+on:
+  push:
+    branches: [knuth-plass-history]
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send repository_dispatch
+        env:
+          GH_TOKEN: ${{ secrets.PLUGIN_DISPATCH_TOKEN }}
+        run: |
+          gh api repos/spfenwick/knuth-plass-plugin/dispatches \
+            -f event_type=crengine-updated \
+            -f "client_payload[ref]=$GITHUB_SHA"
