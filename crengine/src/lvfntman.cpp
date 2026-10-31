@@ -2587,6 +2587,16 @@ public:
         return ch_glyph_index;
     }
 
+    virtual bool hasGlyph( lUInt32 code, bool is_fallback=false ) {
+        // Mirrors the lookup in getGlyphInfo() without FT_Load_Glyph.
+        if ( getCharIndex( code, 0 ) != 0 )
+            return true;
+        LVFontRef fallback = is_fallback ? getNextFallbackFont() : getFallbackFont();
+        if ( !fallback )
+            return false;
+        return fallback->hasGlyph( code, true );
+    }
+
     /** \brief get glyph info
         \param glyph is pointer to glyph_info_t struct to place retrieved info
         \return true if glyh was found
@@ -5363,6 +5373,8 @@ public:
 
     virtual bool getGlyphInfo(lUInt32 c, glyph_info_t* g, lChar32 d=0, bool gi=false, bool fb=false)
         { return _font->getGlyphInfo(c, g, d, gi, fb); }
+    virtual bool hasGlyph(lUInt32 c, bool fb=false)
+        { return _font->hasGlyph(c, fb); }
     virtual bool getGlyphExtraMetric(glyph_extra_metric_t m, lUInt32 c, int& v,
                                       bool s=true, lChar32 d=0, bool fb=false)
         { return _font->getGlyphExtraMetric(m, c, v, s, d, fb); }
@@ -5477,6 +5489,8 @@ public:
         { LVFont* f; lChar32 m; mapChar(ch, f, m); return f->getRightSideBearing(m, n, i); }
     virtual bool getGlyphInfo(lUInt32 c, glyph_info_t* g, lChar32 d=0, bool gi=false, bool fb=false)
         { LVFont* f; lChar32 m; mapChar((lChar32)c, f, m); return f->getGlyphInfo((lUInt32)m, g, d, gi, fb); }
+    virtual bool hasGlyph(lUInt32 c, bool fb=false)
+        { LVFont* f; lChar32 m; mapChar((lChar32)c, f, m); return f->hasGlyph((lUInt32)m, fb); }
     virtual bool getGlyphExtraMetric(glyph_extra_metric_t mt, lUInt32 c, int& v,
                                       bool s=true, lChar32 d=0, bool fb=false)
         { LVFont* f; lChar32 m; mapChar((lChar32)c, f, m); return f->getGlyphExtraMetric(mt, (lUInt32)m, v, s, d, fb); }
