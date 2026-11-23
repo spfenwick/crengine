@@ -5403,7 +5403,14 @@ private:
     }
     bool hasSeparateSmallFont() const { return _smallFont != _font; }
     static bool isLowercase(lChar32 ch) {
+#if USE_HARFBUZZ==1
+        // Not CH_PROP_LOWER: it is also set on uncased letters (Unicode Lo, e.g.
+        // Devanagari, Hebrew, CJK), which must be left alone.
+        return hb_unicode_general_category(hb_unicode_funcs_get_default(), ch)
+                == HB_UNICODE_GENERAL_CATEGORY_LOWERCASE_LETTER;
+#else
         return (lGetCharProps(ch) & CH_PROP_LOWER) != 0;
+#endif
     }
     static bool isUppercase(lChar32 ch) {
         return (lGetCharProps(ch) & CH_PROP_UPPER) != 0;
@@ -5428,9 +5435,29 @@ private:
               widths(new lUInt16[len]), flags(new lUInt8[len]) {}
         ~MappedRun() { delete[] font; delete[] mapped; delete[] widths; delete[] flags; }
     };
-    void fillMappedRun(const lChar32 * text, int len, MappedRun & run) const {
-        for (int i = 0; i < len; i++)
+    // Returns false if nothing was remapped, so the text can go to _font as is.
+    bool fillMappedRun(const lChar32 * text, int len, MappedRun & run) const {
+        bool remapped = false;
+        for (int i = 0; i < len; i++) {
             mapChar(text[i], run.font[i], run.mapped[i]);
+#if USE_HARFBUZZ==1
+            // Keep a combining mark in the run of the shrunk capital it follows,
+            // so it is shaped (positioned) together with its base.
+            if (i > 0 && run.font[i-1] == _smallFont && run.font[i] != _smallFont) {
+                hb_unicode_general_category_t cat =
+                    hb_unicode_general_category(hb_unicode_funcs_get_default(), text[i]);
+                if (cat == HB_UNICODE_GENERAL_CATEGORY_NON_SPACING_MARK
+                        || cat == HB_UNICODE_GENERAL_CATEGORY_SPACING_MARK
+                        || cat == HB_UNICODE_GENERAL_CATEGORY_ENCLOSING_MARK) {
+                    run.font[i] = _smallFont;
+                    run.mapped[i] = text[i];
+                }
+            }
+#endif
+            if (run.font[i] != _font || run.mapped[i] != text[i])
+                remapped = true;
+        }
+        return remapped;
     }
 public:
     /// Synthesis: smallFont is the ~75% instance used for shrunk glyphs.
@@ -5454,8 +5481,11 @@ public:
         { LVFont* f; lChar32 m; mapChar(ch, f, m); return f->getLeftSideBearing(m, n, i); }
     virtual int getRightSideBearing(lChar32 ch, bool n=false, bool i=false)
         { LVFont* f; lChar32 m; mapChar(ch, f, m); return f->getRightSideBearing(m, n, i); }
-    virtual bool getGlyphInfo(lUInt32 c, glyph_info_t* g, lChar32 d=0, bool gi=false, bool fb=false)
-        { LVFont* f; lChar32 m; mapChar((lChar32)c, f, m); return f->getGlyphInfo((lUInt32)m, g, d, gi, fb); }
+    virtual bool getGlyphInfo(lUInt32 c, glyph_info_t* g, lChar32 d=0, bool gi=false, bool fb=false) {
+        if (gi) // a glyph index of the normal font, not a character to map
+            return _font->getGlyphInfo(c, g, d, true, fb);
+        LVFont* f; lChar32 m; mapChar((lChar32)c, f, m); return f->getGlyphInfo((lUInt32)m, g, d, false, fb);
+    }
     virtual bool getGlyphExtraMetric(glyph_extra_metric_t mt, lUInt32 c, int& v,
                                       bool s=true, lChar32 d=0, bool fb=false)
         { LVFont* f; lChar32 m; mapChar((lChar32)c, f, m); return f->getGlyphExtraMetric(mt, (lUInt32)m, v, s, d, fb); }
@@ -5465,7 +5495,8 @@ public:
         if (len <= 0)
             return 0;
         MappedRun run(len);
-        fillMappedRun(text, len, run);
+        if (!fillMappedRun(text, len, run))
+            return _font->getTextWidth(text, len, lc);
         lUInt32 w = 0;
         int i = 0;
         while (i < len) {
@@ -5492,7 +5523,8 @@ public:
         if (len <= 0)
             return 0;
         MappedRun run(len);
-        fillMappedRun(text, len, run);
+        if (!fillMappedRun(text, len, run))
+            return _font->measureText(text, len, widths, flags, max_width, def_char, lc, ls, ah, hints);
         int total = 0;
         int i = 0;
         while (i < len) {
@@ -5525,7 +5557,10 @@ public:
         lUInt32 noDecFlags = flags & ~LFNT_DRAW_DECORATION_MASK;
         if (len > 0) {
             MappedRun run(len);
-            fillMappedRun(text, len, run);
+            if (!fillMappedRun(text, len, run))
+                return _font->DrawTextString(buf, x, y, text, len, def_char, palette, addHyphen, lc,
+                                             flags, letter_spacing, width, text_decoration_back_gap,
+                                             target_w, target_h, svg);
             int i = 0;
             while (i < len) {
                 LVFont* f = run.font[i];
