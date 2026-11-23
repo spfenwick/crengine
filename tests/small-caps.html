@@ -7,23 +7,26 @@
 /* ------------------------------------------------------------------ *
  * Fonts under test.
  *
- * crengine picks one of four code paths per (font, font-variant-caps)
- * pair, in LVFontManager::GetFont() (crengine/src/lvfntman.cpp):
+ * Small caps go through LVFontSmallCapsTransform (crengine/src/lvfntman.cpp),
+ * which picks one of three code paths for each cased letter, by checking
+ * whether the font's own GSUB lookups (as selected for the letter's script
+ * and language) would substitute that letter's glyph:
  *
- *   [native]  font has the needed GSUB feature ('smcp' for small-caps,
- *             'c2sc' for all-small-caps) -- HarfBuzz does the work, no
- *             wrapper.
- *   [synth]   font has no 'smcp' at all -- LVFontSmallCapsTransform in
- *             SYNTH_SMCP / SYNTH_C2SC mode: lowercase (and, for
- *             all-small-caps, uppercase too) is drawn from uppercase
- *             glyphs of a second font instance at ~75% size, +100 weight.
- *   [fold]    font has 'smcp' but no 'c2sc', all-small-caps requested --
- *             LVFontSmallCapsTransform in FOLD_UPPER mode: uppercase is
- *             rewritten to lowercase in the *same* font so the font's own
- *             'smcp' (enabled alongside +c2sc) turns it into small caps.
- *             Nothing is synthesized and no second font instance exists.
+ *   [native]  the needed feature covers the glyph ('smcp' for lowercase,
+ *             'c2sc' for uppercase with all-small-caps) -- the letter is
+ *             left to HarfBuzz in the normal font.
+ *   [fold]    all-small-caps, no 'c2sc' for an uppercase letter, but 'smcp'
+ *             covers its lowercase form -- the letter is rewritten to
+ *             lowercase in the *same* font, whose 'smcp' (enabled alongside
+ *             +c2sc) turns it into a small cap.
+ *   [synth]   neither -- the uppercase form is drawn from a second font
+ *             instance at ~75% size, +100 weight. For a font with no 'smcp'
+ *             at all, every lowercase (and, for all-small-caps, uppercase)
+ *             letter takes this path.
  *   [none]    feature requested that crengine never synthesizes
  *             (petite-caps, unicase, titling-caps): unchanged text.
+ *
+ * Fonts are named after the path most of their Latin takes.
  *
  * The [fold] path is the one that needs a font you probably don't have
  * installed: 'smcp' present, 'c2sc' absent. Put such a font next to this
@@ -114,9 +117,9 @@ code { font-family: "Droid Sans Mono", monospace; font-size: 0.8em; }
 <h1>small-caps / all-small-caps test suite</h1>
 
 <p class="intro">Exercises <code>font-variant-caps: small-caps</code> and
-<code>all-small-caps</code> across the four code paths crengine can take for
-them: native GSUB, synthesis from a smaller font instance, uppercase folding
-onto the font's own <code>smcp</code>, and no-op. The uppercase-folding path is
+<code>all-small-caps</code> across the code paths crengine can take for
+each letter: native GSUB, synthesis from a smaller font instance, uppercase
+folding onto the font's own <code>smcp</code>, and no-op. The uppercase-folding path is
 what commit <q>lvfntman: fake c2sc</q> added, so sections C and D are the ones
 that are new; A, B and E are the regression surface around it.</p>
 
@@ -218,8 +221,9 @@ font's own <code>smcp</code> handles that natively). For
 <code>all-small-caps</code>, crengine rewrites each uppercase character to its
 lowercase counterpart and lets the font's <code>smcp</code> &mdash; enabled
 alongside the <code>+c2sc</code> that the font ignores &mdash; map it to a
-small cap. No second font instance is involved, so nothing should be shrunk,
-re-weighted, or shifted off the baseline.</p>
+small cap. Where <code>smcp</code> covers the letters, nothing is
+synthesized, so nothing should be shrunk, re-weighted, or shifted off the
+baseline.</p>
 
 <div class="case f-fold">
 <p class="look">Expected: row 3 is true small caps throughout, at the same
@@ -271,9 +275,8 @@ leaves lowercase alone, so both lines are plain native <code>smcp</code>.</p>
 
 <div class="case">
 <p class="look">Accented and ligature capitals, the ones a Latin
-<code>smcp</code> is likely to cover. Expected: identical. A real lowercase
-<i>à</i> or <i>œ</i> in the folded line is the D3 effect reaching letters this
-common, which would be worth reporting.</p>
+<code>smcp</code> is likely to cover. Expected: identical, all small caps.
+A real lowercase <i>à</i> or <i>œ</i> in the folded line is a bug.</p>
 <p class="f-native v-c2sc">ÀÉÎÕÜ ÇŒÆØÅ ĆŁŠŻ ǸǼǢ <span class="tag">[native]</span></p>
 <p class="f-fold v-c2sc">ÀÉÎÕÜ ÇŒÆØÅ ĆŁŠŻ ǸǼǢ <span class="tag">[folded]</span></p>
 </div>
@@ -308,28 +311,26 @@ the boundaries.</p>
 <p class="f-fold v-c2sc">McDONALD’S iPhone DVD-RW ſĸʒ ÆØÅ-æøå <span class="tag">[folded]</span></p>
 </div>
 
-<h3>D3. Where folding can show real lowercase</h3>
+<h3>D3. Letters the font's <code>smcp</code> does not cover</h3>
 
-<p class="intro">The fold hands a lowercase character to the font and trusts
-<code>smcp</code> to map it back up. Where <code>smcp</code> does not cover
-that character, nothing maps it back and the reader sees an actual lowercase
-letter &mdash; whereas native <code>c2sc</code>, lacking coverage, leaves the
-capital alone. So the two paths fail differently: native degrades to
-unchanged capitals, folding degrades to changed case. A font will usually
-cover whatever its <code>smcp</code> was drawn for (Latin, typically) and no
-more, so these rows are where you find out how far that goes.</p>
+<p class="intro">A font usually covers whatever its <code>smcp</code> was
+drawn for (Latin, typically) and no more, even when the feature is registered
+under other scripts. Noto Serif registers <code>smcp</code> and
+<code>c2sc</code> under <code>cyrl</code> and <code>grek</code>, but its
+lookups cover Latin only. Folding such a letter would show it as real
+lowercase, and leaving it to the native feature would show an unchanged
+capital, so crengine checks each glyph's coverage and synthesizes the letters
+neither feature covers.</p>
 
-<p class="intro">With a font derived from Noto Serif, all three rows below
-fold into visible lowercase, because its <code>smcp</code> covers Latin only
-even though the feature is registered under <code>cyrl</code> and
-<code>grek</code> too. Compare each pair: the native line keeps its capitals,
-the folded one does not.</p>
+<p class="intro">With a font derived from Noto Serif, every row below is
+synthesized in both lines. Expected: each pair identical, all small caps, no
+real lowercase and no full-size capitals.</p>
 
 <div class="case">
-<p class="look">Greek. Also note that the final sigma of <i>ΛΟΓΟΣ</i> folds to
-<i>σ</i> and never to <i>ς</i>, the mapping being context-free; with a
-Greek-covering <code>smcp</code> that still lands on a small-cap sigma, so it
-would not show.</p>
+<p class="look">Greek. With a Greek-covering <code>smcp</code>, the final
+sigma of <i>ΛΟΓΟΣ</i> would fold to <i>σ</i> and never to <i>ς</i>, the
+mapping being context-free; that still lands on a small-cap sigma, so it would
+not show.</p>
 <p class="f-native v-c2sc">ΑΒΓΔΕΖΗΘ ΛΟΓΟΣ ΣΟΦΟΣ <span class="tag">[native]</span></p>
 <p class="f-fold v-c2sc">ΑΒΓΔΕΖΗΘ ΛΟΓΟΣ ΣΟΦΟΣ <span class="tag">[folded]</span></p>
 </div>
@@ -342,17 +343,15 @@ would not show.</p>
 
 <div class="case">
 <p class="look">Latin digraphs, including the titlecase forms between the
-upper and lower ones. <i>Ǆ</i> folds to <i>ǆ</i>; the titlecase <i>ǅ</i> is
-treated as uppercase too and folds as well, so all three of
-<i>Ǆ&nbsp;ǅ&nbsp;ǆ</i> come out as the same glyph.</p>
+upper and lower ones. The titlecase <i>ǅ</i> is treated as uppercase, so all
+three of <i>Ǆ&nbsp;ǅ&nbsp;ǆ</i> come out as the same glyph.</p>
 <p class="f-native v-c2sc">Ǆ ǅ ǆ ǇǈǉǊǋǌ <span class="tag">[native]</span></p>
 <p class="f-fold v-c2sc">Ǆ ǅ ǆ ǇǈǉǊǋǌ <span class="tag">[folded]</span></p>
 </div>
 
 <div class="case">
 <p class="look">Latin letters that are rarer than the usual
-<code>smcp</code> coverage: the folded line turning lowercase here is the same
-effect inside the font's own script.</p>
+<code>smcp</code> coverage: the same effect inside the font's own script.</p>
 <p class="f-native v-c2sc">ǸǼǢ ƉƐƔƜ ẀẂẄ ȀȄȆ <span class="tag">[native]</span></p>
 <p class="f-fold v-c2sc">ǸǼǢ ƉƐƔƜ ẀẂẄ ȀȄȆ <span class="tag">[folded]</span></p>
 </div>

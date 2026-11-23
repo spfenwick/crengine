@@ -1692,6 +1692,15 @@ protected:
     hb_font_t* _hb_font;
     hb_buffer_t* _hb_buffer;
     LVArray<hb_feature_t> _hb_features;
+    // GSUB lookups of a feature, as HarfBuzz selects them for a script and
+    // language (see featureSubstitutes()).
+    struct FeatureLookups {
+        hb_script_t script;
+        hb_language_t language;
+        hb_tag_t feature;
+        LVArray<unsigned> lookups;
+    };
+    LVPtrVector<FeatureLookups> _feature_lookups;
     // For use with KERNING_MODE_HARFBUZZ:
     LVFontLocalGlyphCache _glyph_cache2;
     // For use with KERNING_MODE_HARFBUZZ_LIGHT:
@@ -2556,6 +2565,74 @@ public:
         return false;
     }
 #endif // USE_HARFBUZZ==1
+
+#if USE_HARFBUZZ==1
+    const LVArray<unsigned> & getFeatureLookups(hb_script_t script, hb_language_t language, hb_tag_t feature) {
+        for (int i = 0; i < _feature_lookups.length(); i++) {
+            FeatureLookups * fl = _feature_lookups[i];
+            if (fl->script == script && fl->language == language && fl->feature == feature)
+                return fl->lookups;
+        }
+        FeatureLookups * fl = new FeatureLookups();
+        fl->script = script;
+        fl->language = language;
+        fl->feature = feature;
+        _feature_lookups.add(fl);
+        hb_face_t * face = hb_font_get_face(_hb_font);
+        hb_tag_t script_tags[HB_OT_MAX_TAGS_PER_SCRIPT];
+        hb_tag_t language_tags[HB_OT_MAX_TAGS_PER_LANGUAGE];
+        unsigned int script_count = HB_OT_MAX_TAGS_PER_SCRIPT;
+        unsigned int language_count = HB_OT_MAX_TAGS_PER_LANGUAGE;
+        hb_ot_tags_from_script_and_language(script, language, &script_count, script_tags,
+                                            &language_count, language_tags);
+        // Like HarfBuzz's shaper, fall back to the DFLT/dflt/latn script and
+        // to the default language system when there is no exact match.
+        unsigned int script_index, language_index, feature_index;
+        hb_ot_layout_table_select_script(face, HB_OT_TAG_GSUB, script_count, script_tags, &script_index, NULL);
+        if (script_index == HB_OT_LAYOUT_NO_SCRIPT_INDEX)
+            return fl->lookups;
+        hb_ot_layout_script_select_language(face, HB_OT_TAG_GSUB, script_index,
+                                            language_count, language_tags, &language_index);
+        if (!hb_ot_layout_language_find_feature(face, HB_OT_TAG_GSUB, script_index, language_index,
+                                                feature, &feature_index))
+            return fl->lookups;
+        unsigned int start = 0;
+        for (;;) {
+            unsigned int buf[32];
+            unsigned int count = 32;
+            hb_ot_layout_feature_get_lookups(face, HB_OT_TAG_GSUB, feature_index, start, &count, buf);
+            for (unsigned int i = 0; i < count; i++)
+                fl->lookups.add(buf[i]);
+            start += count;
+            if (count < 32)
+                break;
+        }
+        return fl->lookups;
+    }
+
+    /// True if shaping code in this font with the GSUB feature enabled would
+    /// substitute its glyph. Fonts often register a feature for scripts their
+    /// lookups don't cover (e.g. 'smcp' under grek with Latin-only glyphs),
+    /// so this checks the glyph itself, not just the feature's presence.
+    bool featureSubstitutes(lChar32 code, hb_tag_t feature, hb_language_t language) {
+        FONT_GUARD
+        if (!_hb_font)
+            return false;
+        hb_codepoint_t glyph = getCharIndex(code, 0);
+        if (!glyph)
+            return false;
+        if (language == HB_LANGUAGE_INVALID) // as hb_buffer_guess_segment_properties()
+            language = hb_language_get_default();
+        hb_script_t script = hb_unicode_script(hb_unicode_funcs_get_default(), code);
+        const LVArray<unsigned> & lookups = getFeatureLookups(script, language, feature);
+        hb_face_t * face = hb_font_get_face(_hb_font);
+        for (int i = 0; i < lookups.length(); i++) {
+            if (hb_ot_layout_lookup_would_substitute(face, lookups[i], &glyph, 1, true))
+                return true;
+        }
+        return false;
+    }
+#endif
 
     FT_UInt getCharIndex( lChar32 code, lChar32 def_char ) {
         if ( code=='\t' )
@@ -5295,6 +5372,7 @@ public:
             hb_font_destroy(_hb_font);
             _hb_font = 0;
         }
+        _feature_lookups.clear();
         #endif
         if ( _face ) {
             FT_Done_Face(_face);
@@ -5376,24 +5454,21 @@ public:
     virtual ~LVFontProxy() {}
 };
 
-/// Small-caps support for fonts lacking some of the needed GSUB features.
-/// Synthesis modes route lowercase characters to uppercase glyphs in a smaller
-/// font instance (~75% of the normal size). FOLD_UPPER is for fonts that have
-/// 'smcp' but no 'c2sc' (all-small-caps requested): uppercase characters are
-/// routed to their lowercase counterparts in the same font, whose native
-/// 'smcp' then turns them into small caps - nothing is synthesized.
+/// Small caps for fonts whose GSUB features don't cover every letter.
+/// Each cased letter is decided on its own, as the font's 'smcp' (for
+/// lowercase) and 'c2sc' (for uppercase with all-small-caps) would handle it:
+/// - native: the feature substitutes the glyph; the letter goes to the normal
+///   font, where HarfBuzz applies the feature.
+/// - fold: no 'c2sc' for an uppercase letter, but 'smcp' covers its lowercase
+///   form; the lowercase letter goes to the normal font.
+/// - synthesized: neither; the uppercase form is drawn by a smaller font
+///   instance (~75% of the normal size).
 class LVFontSmallCapsTransform : public LVFontProxy
 {
-public:
-    enum Mode {
-        SYNTH_SMCP, // small-caps: lowercase shrunk
-        SYNTH_C2SC, // all-small-caps: lowercase and uppercase shrunk
-        FOLD_UPPER  // all-small-caps with native 'smcp' but no 'c2sc'
-    };
-private:
-    LVFontRef  _smallRef;  // keeps the small font alive (empty in FOLD_UPPER mode)
-    LVFont   * _smallFont; // fast pointer; matches _smallRef throughout lifetime (same pattern as LVFontProxy::_wrappedRef/_font); == _font in FOLD_UPPER mode
-    Mode       _mode;
+    LVFontRef  _smallRef;  // keeps the small font alive
+    LVFont   * _smallFont; // fast pointer; matches _smallRef throughout lifetime (same pattern as LVFontProxy::_wrappedRef/_font)
+    LVFreeTypeFace * _native; // the normal font, for checking its GSUB coverage; NULL if it has no 'smcp'/'c2sc'
+    bool       _allCaps; // all-small-caps (c2sc): uppercase is reduced too
 
     static lChar32 toUppercase(lChar32 ch) {
         lChar32 buf[1] = { ch }; lStr_uppercase(buf, 1); return buf[0];
@@ -5401,7 +5476,6 @@ private:
     static lChar32 toLowercase(lChar32 ch) {
         lChar32 buf[1] = { ch }; lStr_lowercase(buf, 1); return buf[0];
     }
-    bool hasSeparateSmallFont() const { return _smallFont != _font; }
     static bool isLowercase(lChar32 ch) {
 #if USE_HARFBUZZ==1
         // Not CH_PROP_LOWER: it is also set on uncased letters (Unicode Lo, e.g.
@@ -5415,11 +5489,34 @@ private:
     static bool isUppercase(lChar32 ch) {
         return (lGetCharProps(ch) & CH_PROP_UPPER) != 0;
     }
-    void mapChar(lChar32 ch, LVFont*& font, lChar32& mapped) const {
-        if (_mode == FOLD_UPPER)                         { font = _font;      mapped = isUppercase(ch) ? toLowercase(ch) : ch; }
-        else if (isLowercase(ch))                        { font = _smallFont; mapped = toUppercase(ch); }
-        else if (_mode == SYNTH_C2SC && isUppercase(ch)) { font = _smallFont; mapped = ch; }
-        else                                             { font = _font;      mapped = ch; }
+    bool hasNative(lChar32 ch, bool c2sc, TextLangCfg * lang) const {
+#if USE_HARFBUZZ==1
+        return _native && _native->featureSubstitutes(ch,
+                c2sc ? HB_TAG('c','2','s','c') : HB_TAG('s','m','c','p'),
+                lang ? lang->getHBLanguage() : HB_LANGUAGE_INVALID);
+#else
+        return false;
+#endif
+    }
+    void mapChar(lChar32 ch, LVFont*& font, lChar32& mapped, TextLangCfg * lang = NULL) const {
+        font = _font;
+        mapped = ch;
+        if (isLowercase(ch)) {
+            if (hasNative(ch, false, lang))
+                return;
+            font = _smallFont;
+            mapped = toUppercase(ch);
+        }
+        else if (_allCaps && isUppercase(ch)) {
+            if (hasNative(ch, true, lang))
+                return;
+            lChar32 lower = toLowercase(ch);
+            if (lower != ch && hasNative(lower, false, lang)) {
+                mapped = lower;
+                return;
+            }
+            font = _smallFont;
+        }
     }
     // Per-character font/glyph mapping, plus buffer for the longest
     // possible run, so consecutive characters routed to the same font can be
@@ -5436,10 +5533,10 @@ private:
         ~MappedRun() { delete[] font; delete[] mapped; delete[] widths; delete[] flags; }
     };
     // Returns false if nothing was remapped, so the text can go to _font as is.
-    bool fillMappedRun(const lChar32 * text, int len, MappedRun & run) const {
+    bool fillMappedRun(const lChar32 * text, int len, MappedRun & run, TextLangCfg * lang) const {
         bool remapped = false;
         for (int i = 0; i < len; i++) {
-            mapChar(text[i], run.font[i], run.mapped[i]);
+            mapChar(text[i], run.font[i], run.mapped[i], lang);
 #if USE_HARFBUZZ==1
             // Keep a combining mark in the run of the shrunk capital it follows,
             // so it is shaped (positioned) together with its base.
@@ -5460,20 +5557,19 @@ private:
         return remapped;
     }
 public:
-    /// Synthesis: smallFont is the ~75% instance used for shrunk glyphs.
-    LVFontSmallCapsTransform(LVFontRef normalFont, LVFontRef smallFont, bool allCaps = false)
+    /// smallFont is the ~75% instance used for synthesized glyphs. native is
+    /// normalFont's face, if it has any 'smcp'/'c2sc' (else NULL).
+    LVFontSmallCapsTransform(LVFontRef normalFont, LVFontRef smallFont, LVFreeTypeFace * native, bool allCaps)
         : LVFontProxy(normalFont), _smallRef(smallFont), _smallFont(smallFont.get()),
-          _mode(allCaps ? SYNTH_C2SC : SYNTH_SMCP) {}
-    /// FOLD_UPPER: no small font; everything goes through normalFont.
-    explicit LVFontSmallCapsTransform(LVFontRef normalFont)
-        : LVFontProxy(normalFont), _smallFont(normalFont.get()), _mode(FOLD_UPPER) {}
+          _native(native), _allCaps(allCaps) {}
 
-    virtual void setBitmapMode(bool m)            { LVFontProxy::setBitmapMode(m);  if (hasSeparateSmallFont()) _smallFont->setBitmapMode(m); }
-    virtual void setKerningMode(kerning_mode_t m) { LVFontProxy::setKerningMode(m); if (hasSeparateSmallFont()) _smallFont->setKerningMode(m); }
-    virtual void setHintingMode(hinting_mode_t m) { LVFontProxy::setHintingMode(m); if (hasSeparateSmallFont()) _smallFont->setHintingMode(m); }
-    virtual void clearCache() { LVFontProxy::clearCache(); if (hasSeparateSmallFont()) _smallFont->clearCache(); }
+    virtual void setBitmapMode(bool m)            { LVFontProxy::setBitmapMode(m);  _smallFont->setBitmapMode(m); }
+    virtual void setKerningMode(kerning_mode_t m) { LVFontProxy::setKerningMode(m); _smallFont->setKerningMode(m); }
+    virtual void setHintingMode(hinting_mode_t m) { LVFontProxy::setHintingMode(m); _smallFont->setHintingMode(m); }
+    virtual void clearCache() { LVFontProxy::clearCache(); _smallFont->clearCache(); }
     virtual void Clear()      { LVFontProxy::Clear();      _smallRef.Clear(); }
-    virtual bool hasOTMathSupport() const { return false; }
+    // Fonts with native small caps kept their math support when they were not wrapped.
+    virtual bool hasOTMathSupport() const { return _native && _font->hasOTMathSupport(); }
 
     virtual int getCharWidth(lChar32 ch, lChar32 d=0)
         { LVFont* f; lChar32 m; mapChar(ch, f, m); return f->getCharWidth(m, d); }
@@ -5495,7 +5591,7 @@ public:
         if (len <= 0)
             return 0;
         MappedRun run(len);
-        if (!fillMappedRun(text, len, run))
+        if (!fillMappedRun(text, len, run, lc))
             return _font->getTextWidth(text, len, lc);
         lUInt32 w = 0;
         int i = 0;
@@ -5523,7 +5619,7 @@ public:
         if (len <= 0)
             return 0;
         MappedRun run(len);
-        if (!fillMappedRun(text, len, run))
+        if (!fillMappedRun(text, len, run, lc))
             return _font->measureText(text, len, widths, flags, max_width, def_char, lc, ls, ah, hints);
         int total = 0;
         int i = 0;
@@ -5557,7 +5653,7 @@ public:
         lUInt32 noDecFlags = flags & ~LFNT_DRAW_DECORATION_MASK;
         if (len > 0) {
             MappedRun run(len);
-            if (!fillMappedRun(text, len, run))
+            if (!fillMappedRun(text, len, run, lc))
                 return _font->DrawTextString(buf, x, y, text, len, def_char, palette, addHyphen, lc,
                                              flags, letter_spacing, width, text_decoration_back_gap,
                                              target_w, target_h, svg);
@@ -7927,8 +8023,8 @@ public:
             hb_face_t* hb_face = hb_ft_face_create(ft_face, NULL);
             if (hb_ot_math_has_data(hb_face))
                 def.has_ot_math = true;
-            // Native small-caps GSUB features: missing 'smcp' triggers synthesis,
-            // missing 'c2sc' (with 'smcp' present) triggers uppercase folding.
+            // Native small-caps GSUB features. With neither, small caps are all
+            // synthesized; otherwise coverage is checked per glyph.
             def.has_small_caps = hasGSUBFeature(hb_face, HB_TAG('s','m','c','p'));
             def.has_c2sc       = hasGSUBFeature(hb_face, HB_TAG('c','2','s','c'));
             hb_face_destroy(hb_face);
@@ -8074,11 +8170,10 @@ public:
         #endif
         }
 
-        // Apply small-caps synthesis: wrap with a transform that routes lowercase
-        // letters to uppercase glyphs rendered at ~75% of the normal size.
-        bool needsSmallCaps = (features & (LFNT_OT_FEATURES_P_SMCP | LFNT_OT_FEATURES_P_C2SC))
-                               && !face.has_small_caps;
-        if (needsSmallCaps) {
+        // Small caps: wrap with a transform that leaves to HarfBuzz the letters
+        // the font's own 'smcp'/'c2sc' cover, and synthesizes the others from
+        // uppercase glyphs rendered at ~75% of the normal size.
+        if (features & (LFNT_OT_FEATURES_P_SMCP | LFNT_OT_FEATURES_P_C2SC)) {
             int small_size = (size * 3 + 2) / 4; // ~75%, rounded up
             if (small_size < 1) small_size = 1;
             // Carry wdth/opsz through verbatim: computeVariations() only honours
@@ -8105,13 +8200,8 @@ public:
                                          _font_selector.computeVariations(face, smallVars, small_weight, italic));
             if (!smallRef.isNull())
                 ref = LVFontRef(new LVFontSmallCapsTransform(ref, smallRef,
+                                    face.has_small_caps || face.has_c2sc ? font : NULL,
                                     (features & LFNT_OT_FEATURES_P_C2SC) != 0));
-        }
-        else if ((features & LFNT_OT_FEATURES_P_C2SC) && !face.has_c2sc) {
-            // Font has 'smcp' but no 'c2sc': nothing to synthesize, but uppercase
-            // must be fed as lowercase so the font's own 'smcp' (enabled along
-            // with +c2sc) turns it into small caps.
-            ref = LVFontRef(new LVFontSmallCapsTransform(ref));
         }
 
         _instance_cache.put(key, ref);
